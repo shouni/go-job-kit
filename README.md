@@ -72,8 +72,6 @@ go-job-kit/
 
 ## 🚀 クイックスタート (Quick Start)
 
-> ⚠️ 以下は設計の下書きです。API は実装時に変わる可能性があります。
-
 ### ジョブ状態の記録 (`jobstatus`)
 
 アプリ固有のフィールドは `jobstatus.Status` を埋め込んだ構造体に持たせます。
@@ -85,9 +83,13 @@ type ComicJobStatus struct {
     OutputDir string `json:"output_dir,omitempty"`
 }
 
-store := jobstatus.NewStore[ComicJobStatus](reader, writer, locator)
+// reader / writer には remoteio.InputReader / remoteio.OutputWriter をそのまま渡せます。
+store := jobstatus.NewStore[ComicJobStatus](
+    reader, writer,
+    jobstatus.UnderJobDir("gs://"+bucket+"/comics"), // → .../comics/{jobID}/status.json
+)
 
-// 投入直後に queued を記録する
+// 投入直後に queued を記録する。JobID と UpdatedAt は Save が打刻します。
 _ = store.Save(ctx, jobID, ComicJobStatus{
     Status: jobstatus.Status{State: jobstatus.StateQueued, Command: "generate_comic"},
 })
@@ -102,15 +104,25 @@ if errors.Is(err, jobstatus.ErrNotFound) {
 ### 履歴のページング (`paging`)
 
 ```go
-ids, meta := paging.SelectIDs(jobIDs, page, perPage) // 新しい順に切り出す
+ids, meta := paging.SelectIDs(jobIDs, page, perPage) // 新しい順に切り出す（引数は変更しません）
 items := loadHistories(ctx, ids)                     // 一部の読み込み失敗はスキップ
 meta = paging.AdjustItemCount(meta, len(items))      // 実件数に合わせて From/To を補正
 ```
 
+ジョブ ID にプレフィックスが複数混在する一覧では、ID の文字列比較がプレフィックス順に
+なってしまいます。埋め込まれたタイムスタンプなど、別のソートキーを渡してください。
+
+```go
+ids, meta := paging.SelectIDs(jobIDs, page, perPage, paging.WithSortKey(embeddedTimestamp))
+```
+
 ### TTL キャッシュ (`cache`)
+
+`NewTTL` は期限切れエントリの回収まで開始します。使い終わったら `Close` してください。
 
 ```go
 histories := cache.NewTTL[ComicHistory](10 * time.Minute)
+defer histories.Close()
 
 if h, ok := histories.Get(jobID); ok {
     return h, nil
