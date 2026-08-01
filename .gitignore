@@ -1,0 +1,32 @@
+# JetBrains IDEs
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# macOS
+.DS_Store
+
+# Go build artifacts
+*.exe
+*.dll
+*.so
+*.o
+*.a
+/bin/
+/.gocache/
+/.cache/
+
+# Environment files
+# Ignore all .env files but keep templates
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# VSCode editor
+.vscode/
+
+# Go test coverage
+/coverage.out
+/coverage.html
