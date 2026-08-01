@@ -1,6 +1,7 @@
 package cache_test
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -115,4 +116,29 @@ func TestCloseIsIdempotent(t *testing.T) {
 	c := cache.NewTTL[string](time.Minute)
 	c.Close()
 	c.Close()
+}
+
+// 複数のゴルーチンから同時に Close しても安全なこと。
+// 「停止済みか確認してから停止する」実装だと、判定と実行の間に割り込まれて
+// 二重停止になります。逐次の二重 Close ではこれを検出できません。
+func TestConcurrentCloseIsSafe(t *testing.T) {
+	t.Parallel()
+
+	c := cache.NewTTL[string](time.Minute)
+
+	const goroutines = 16
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			<-start // 同時に踏ませる
+			c.Close()
+		}()
+	}
+
+	close(start)
+	wg.Wait()
 }

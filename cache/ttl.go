@@ -5,6 +5,7 @@
 package cache
 
 import (
+	"sync"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -15,10 +16,11 @@ import (
 const DefaultTTL = 10 * time.Minute
 
 // TTL は、ジョブ ID をキーとする TTL 付きキャッシュです。ゼロ値は使えません。
-// 複数のゴルーチンから同時に呼び出せます。
+// Close を含め、複数のゴルーチンから同時に呼び出せます。
 type TTL[T any] struct {
 	cache *ttlcache.Cache[string, T]
-	stop  chan struct{}
+	// closeOnce は、回収の停止をちょうど 1 回だけ行わせます。
+	closeOnce sync.Once
 }
 
 // NewTTL はキャッシュを生成し、期限切れエントリを回収するゴルーチンを開始します。
@@ -41,14 +43,9 @@ func NewTTL[T any](ttl time.Duration) *TTL[T] {
 			// 保持期間は「最後に書いてから」で数えます。
 			ttlcache.WithDisableTouchOnHit[string, T](),
 		),
-		stop: make(chan struct{}),
 	}
 
-	go func() {
-		go c.cache.Start()
-		<-c.stop
-		c.cache.Stop()
-	}()
+	go c.cache.Start()
 
 	return c
 }
@@ -78,13 +75,13 @@ func (c *TTL[T]) Len() int {
 	return c.cache.Len()
 }
 
-// Close は回収用のゴルーチンを停止します。二重に呼んでも安全です。
+// Close は回収用のゴルーチンを停止し、その終了まで待ちます。
+//
+// 何度呼んでも、複数のゴルーチンから同時に呼んでも安全です。停止処理を
+// sync.Once に通しているのは、「まだ停止していないか確認してから停止する」形にすると
+// 判定と実行の間に別のゴルーチンが割り込めるためです。
 func (c *TTL[T]) Close() {
-	select {
-	case <-c.stop:
-	default:
-		close(c.stop)
-	}
+	c.closeOnce.Do(c.cache.Stop)
 }
 
 // key は、キャッシュキーに使うジョブ ID を正規化します。

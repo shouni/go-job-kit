@@ -3,7 +3,7 @@ module github.com/shouni/go-job-kit
 go 1.26
 
 require (
-	github.com/jellydator/ttlcache/v3 v3.4.0
+	github.com/jellydator/ttlcache/v3 v3.4.1
 	github.com/shouni/go-remote-io v1.7.2
 	github.com/shouni/go-utils v1.3.0
 )
