@@ -25,12 +25,12 @@ const (
 
 // Status は、アプリ間で共通するジョブ進行状況のフィールドです。
 //
-// 成果物の保存先はアプリごとに形が違う（単一 URI・出力ディレクトリ・複数 URI）ため、
+// 成果物の保存先はサービスごとに形が違う（単一 URI・出力ディレクトリ・複数 URI）ため、
 // ここには持たせません。利用側は本構造体を埋め込んだ型を定義してください。
 // Go は埋め込み構造体を JSON でフラットに展開するため、既存の status.json を
 // そのまま読み書きできます。
 //
-//	type ComicJobStatus struct {
+//	type JobStatus struct {
 //	    jobstatus.Status
 //	    OutputDir string `json:"output_dir,omitempty"`
 //	}

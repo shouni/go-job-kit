@@ -17,18 +17,18 @@ import (
 
 const testJobID = "c20260726-120000-abcd1234"
 
-const testBaseURI = "gs://bucket/comics"
+const testBaseURI = "gs://bucket/jobs"
 
 const testStatusPath = testBaseURI + "/" + testJobID + "/status.json"
 
-// comicStatus は、利用側がアプリ固有のフィールドを足す典型例です。
-type comicStatus struct {
+// appStatus は、利用側がサービス固有のフィールドを足す典型例です。
+type appStatus struct {
 	jobstatus.Status
 	OutputDir string `json:"output_dir,omitempty"`
 }
 
-func newStore(store *memStore) *jobstatus.Store[comicStatus] {
-	return jobstatus.NewStore[comicStatus](store, store, jobstatus.UnderJobDir(testBaseURI))
+func newStore(store *memStore) *jobstatus.Store[appStatus] {
+	return jobstatus.NewStore[appStatus](store, store, jobstatus.UnderJobDir(testBaseURI))
 }
 
 // 状態は成果物と同じジョブディレクトリ配下に置き、履歴削除（プレフィックス一括削除）で
@@ -37,8 +37,8 @@ func TestSaveWritesInsideJobDirectory(t *testing.T) {
 	t.Parallel()
 
 	store := newMemStore()
-	err := newStore(store).Save(context.Background(), testJobID, comicStatus{
-		Status: jobstatus.Status{Command: "compose_comic", State: jobstatus.StateQueued},
+	err := newStore(store).Save(context.Background(), testJobID, appStatus{
+		Status: jobstatus.Status{Command: "generate", State: jobstatus.StateQueued},
 	})
 	if err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -53,9 +53,9 @@ func TestSaveAndGetRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	store := newStore(newMemStore())
-	original := comicStatus{
+	original := appStatus{
 		Status: jobstatus.Status{
-			Command:  "compose_comic",
+			Command:  "generate",
 			State:    jobstatus.StateSucceeded,
 			Title:    "テスト作品",
 			Attempts: 3,
@@ -97,9 +97,9 @@ func TestStoredJSONStaysFlat(t *testing.T) {
 	t.Parallel()
 
 	store := newMemStore()
-	err := newStore(store).Save(context.Background(), testJobID, comicStatus{
-		Status:    jobstatus.Status{Command: "compose_comic", State: jobstatus.StateRunning},
-		OutputDir: "gs://bucket/comics/x",
+	err := newStore(store).Save(context.Background(), testJobID, appStatus{
+		Status:    jobstatus.Status{Command: "generate", State: jobstatus.StateRunning},
+		OutputDir: "gs://bucket/jobs/x",
 	})
 	if err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -171,7 +171,7 @@ func TestSaveNormalizesPathTraversalJobID(t *testing.T) {
 	store := newMemStore()
 
 	// "../../etc/passwd" は末尾要素 "passwd" へ正規化され、baseURI 配下に収まる。
-	err := newStore(store).Save(context.Background(), "../../etc/passwd", comicStatus{
+	err := newStore(store).Save(context.Background(), "../../etc/passwd", appStatus{
 		Status: jobstatus.Status{State: jobstatus.StateQueued},
 	})
 	if err != nil {
@@ -191,7 +191,7 @@ func TestSaveRejectsInvalidJobID(t *testing.T) {
 
 	store := newMemStore()
 
-	err := newStore(store).Save(context.Background(), "日本語", comicStatus{
+	err := newStore(store).Save(context.Background(), "日本語", appStatus{
 		Status: jobstatus.Status{State: jobstatus.StateQueued},
 	})
 	if err == nil {
@@ -211,7 +211,7 @@ func TestSaveOverwritesPreviousStatus(t *testing.T) {
 	ctx := context.Background()
 
 	for _, state := range []jobstatus.State{jobstatus.StateQueued, jobstatus.StateRunning, jobstatus.StateSucceeded} {
-		if err := s.Save(ctx, testJobID, comicStatus{Status: jobstatus.Status{State: state}}); err != nil {
+		if err := s.Save(ctx, testJobID, appStatus{Status: jobstatus.Status{State: state}}); err != nil {
 			t.Fatalf("Save(%q) error = %v", state, err)
 		}
 	}
@@ -220,7 +220,7 @@ func TestSaveOverwritesPreviousStatus(t *testing.T) {
 		t.Fatalf("オブジェクト数 = %d, want 1（上書きされていない）: %v", got, store.keys())
 	}
 
-	var stored comicStatus
+	var stored appStatus
 	if err := json.Unmarshal(store.files[testStatusPath], &stored); err != nil {
 		t.Fatalf("保存された JSON が不正: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestSaveOverwritesPreviousStatus(t *testing.T) {
 func TestSaveDoesNotMutateArgument(t *testing.T) {
 	t.Parallel()
 
-	status := comicStatus{Status: jobstatus.Status{State: jobstatus.StateQueued}}
+	status := appStatus{Status: jobstatus.Status{State: jobstatus.StateQueued}}
 
 	if err := newStore(newMemStore()).Save(context.Background(), testJobID, status); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -251,7 +251,7 @@ func TestSavePassesWriteOptions(t *testing.T) {
 	t.Parallel()
 
 	store := newMemStore()
-	err := newStore(store).Save(context.Background(), testJobID, comicStatus{
+	err := newStore(store).Save(context.Background(), testJobID, appStatus{
 		Status: jobstatus.Status{State: jobstatus.StateQueued},
 	})
 	if err != nil {
@@ -272,7 +272,7 @@ func TestDeleteRemovesStatus(t *testing.T) {
 	s := newStore(store)
 	ctx := context.Background()
 
-	if err := s.Save(ctx, testJobID, comicStatus{Status: jobstatus.Status{State: jobstatus.StateFailed}}); err != nil {
+	if err := s.Save(ctx, testJobID, appStatus{Status: jobstatus.Status{State: jobstatus.StateFailed}}); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 	if err := s.Delete(ctx, testJobID); err != nil {
@@ -310,8 +310,8 @@ func TestSaveWithoutEmbeddedStatus(t *testing.T) {
 func TestUnderJobDirRejectsEmptyBase(t *testing.T) {
 	t.Parallel()
 
-	s := jobstatus.NewStore[comicStatus](newMemStore(), newMemStore(), jobstatus.UnderJobDir("  "))
-	if err := s.Save(context.Background(), testJobID, comicStatus{}); err == nil {
+	s := jobstatus.NewStore[appStatus](newMemStore(), newMemStore(), jobstatus.UnderJobDir("  "))
+	if err := s.Save(context.Background(), testJobID, appStatus{}); err == nil {
 		t.Fatal("Save() error = nil, want an error for empty base URI")
 	}
 }
