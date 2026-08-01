@@ -4,9 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-All three packages (`paging`, `jobstatus`, `cache`) are implemented and tested. No consumer has
-adopted them yet — `ap-comp` / `ap-mv` / `ap-comic` still run their own copies, so this library
-has no released tag and its API can still change without a migration.
+All three packages (`paging`, `jobstatus`, `cache`) are implemented and tested, released as
+v1.0.1, and consumed by `ap-comp`, `ap-mv` and `ap-comic` — all three pinned to v1.0.1.
+
+**The API is now load-bearing.** A breaking change here means a migration in three services,
+so add to the surface rather than reshaping it, and tag a new minor when you do. Two constraints
+in particular cannot be relaxed without touching stored data: `jobstatus.Status` is embedded by
+the consumers so its JSON stays flat (see below), and `paging.PageMeta`'s tags are what their
+HTTP responses already return.
 
 ## Commands
 
@@ -21,28 +26,35 @@ golangci-lint run ./...
 
 ## Why this repository exists
 
-`ap-comp`, `ap-mv`, and `ap-comic` each implement the same job scaffolding — submit to Cloud Tasks,
-record progress to GCS, page through history — in their own `internal/` trees. Several files are
-identical apart from the import path. This library extracts only that shared skeleton.
+`ap-comp`, `ap-mv` and `ap-comic` each carried the same job scaffolding — submit to Cloud Tasks,
+record progress to GCS, page through history — in their own `internal/` trees, several files
+byte-identical apart from the import path. This library holds that shared skeleton; the three
+now delegate to it.
 
-**The origin code is the primary reference.** When implementing a package here, read the existing
-implementations first; they carry the operational knowledge (Cloud Run quirks, at-least-once
-retry handling) that motivated each decision:
+**The original implementations are the primary reference** — they carry the operational knowledge
+(Cloud Run quirks, at-least-once retry handling) behind each decision. They are no longer at the
+paths below, because adopting this library rewrote or deleted them. Read them from the commit
+*before* each migration:
 
-| Package | Origin |
-| --- | --- |
-| `paging` | `../ap-comp/internal/repository/history_page.go` (byte-identical to `../ap-comic`'s, modulo comments) |
-| `jobstatus` | `../ap-comp/internal/repository/job_status.go` + `../ap-comp/internal/domain/job_status.go`, and the `../ap-comic` counterparts |
-| `cache` | `../ap-comp/internal/repository/history_cache.go`, `../ap-mv/internal/repository/history_cache.go` |
+```bash
+git -C ../ap-comp  show 7827cea^:internal/repository/history_page.go     # paging
+git -C ../ap-comp  show 7827cea^:internal/repository/job_status.go       # jobstatus
+git -C ../ap-comic show 250ff0d^:internal/domain/job_status.go
+git -C ../ap-mv    show aa619d4^:internal/repository/history_cache.go    # cache
+```
 
-The three apps' copies have already drifted. Known divergences this library settles rather than
-reproduces:
+The migration commits themselves (`ap-comp 7827cea`, `ap-comic 250ff0d`, `ap-mv aa619d4`) show
+what each app kept locally versus handed over.
 
-1. `ap-comp` normalizes cache keys via `jobid.Sanitize`; `ap-mv` uses the raw job ID.
-2. `ap-comp`'s job status repository has `Delete`; `ap-comic`'s does not.
-3. `ap-comp` and `ap-comic` run `go cache.Start()` on their ttlcaches; `ap-mv` never does, so its
-   expired history/recipe entries are never reclaimed. `cache.NewTTL` starts the janitor itself
-   so this cannot be forgotten.
+The copies had drifted before adoption. These divergences are settled here rather than
+reproduced, so do not reintroduce them as caller options:
+
+1. `ap-comp` normalized cache keys via `jobid.Sanitize`; `ap-mv` used the raw job ID. `cache.TTL`
+   normalizes internally.
+2. `ap-comp`'s job status repository had `Delete`; `ap-comic`'s did not. `jobstatus.Store` has it.
+3. `ap-comp` and `ap-comic` ran `go cache.Start()` on their ttlcaches; `ap-mv` never did, so its
+   expired entries were never reclaimed. `cache.NewTTL` starts the janitor itself, which is why
+   it also owns `Close`.
 4. `ap-mv` sorts history by a timestamp extracted from the job ID, the others sort the ID
    lexically — **this one is not drift**. See below.
 
