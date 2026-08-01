@@ -11,6 +11,13 @@ updates:
   # のを防ぎます。グループ化しているため、既存の PR は作り直されず更新されます。
   - package-ecosystem: gomod
     directory: /
+    # 定常更新の PR は develop 宛にします。依存更新も他の変更と同じ経路
+    # （develop → main）を通り、main を検証済みの状態に保てます。
+    #
+    # なお、この指定が効くのは定常更新だけです。脆弱性の修正 PR は
+    # target-branch に関わらず常にデフォルトブランチ（main）宛に作られます。
+    # 緊急対応を develop の進行状況から切り離すための GitHub 側の仕様です。
+    target-branch: develop
     schedule:
       interval: daily
     open-pull-requests-limit: 5
@@ -24,6 +31,7 @@ updates:
   # CI で使用する GitHub Actions のバージョン更新。
   - package-ecosystem: github-actions
     directory: /
+    target-branch: develop
     schedule:
       interval: daily
     open-pull-requests-limit: 5
