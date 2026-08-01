@@ -1,0 +1,35 @@
+version: 2
+
+updates:
+  # Go モジュールの更新。
+  # 全依存を 1 グループにまとめ、1 本の PR に収めます。個別に PR を立てると
+  # 直接依存の多いリポジトリで大量に積み上がるうえ、相互に整合が必要な依存
+  # （cloud.google.com/go 系など）が別々の PR に割れてしまうためです。
+  #
+  # 毎日確認するのは、内部ライブラリ（github.com/shouni/*）にタグを打った翌日には
+  # 依存側へ PR が届くようにするためです。バージョンが枝分かれしたまま放置される
+  # のを防ぎます。グループ化しているため、既存の PR は作り直されず更新されます。
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+
+  # CI で使用する GitHub Actions のバージョン更新。
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
