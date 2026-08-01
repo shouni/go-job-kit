@@ -96,8 +96,7 @@ func TestSelectIDsDoesNotMutateInput(t *testing.T) {
 }
 
 // WithSortKey は、ID の文字列比較がプレフィックス順になってしまう一覧のためのもの。
-// ap-mv は "video-recipe-" / "short-" / "mv-" 等を混在させるため、これが無いと
-// 古いジョブが先頭に来ます。
+// 用途ごとに異なるプレフィックスが混在すると、これが無いと古いジョブが先頭に来ます。
 func TestSelectIDsWithSortKey(t *testing.T) {
 	t.Parallel()
 
@@ -165,8 +164,8 @@ func TestAdjustItemCountWithoutPaging(t *testing.T) {
 	}
 }
 
-// embeddedTimestamp は ap-mv の historyCreatedAtRaw 相当のソートキーです。
-// この抽出規則自体はライブラリに入れていません（利用側が 1 つのみのため）。
+// embeddedTimestamp は、ID の途中に埋まった時刻を取り出すソートキーの例です。
+// 抽出規則そのものは利用側の ID 形式に依存するため、ライブラリには入れていません。
 func embeddedTimestamp(jobID string) string {
 	const layout = "20060102150405"
 
