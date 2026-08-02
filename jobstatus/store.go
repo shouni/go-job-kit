@@ -120,7 +120,11 @@ func (s *Store[T]) Get(ctx context.Context, jobID string) (T, error) {
 	if err != nil {
 		// remoteio は「未存在」を型付きで返さないため、読めなかった時点で未記録とみなします。
 		// 状態の欠落で処理を止めるより、記録が無いものとして先へ進めるほうが安全です。
-		return status, fmt.Errorf("%w: %s", ErrNotFound, safeJobID)
+		//
+		// ただし原因は捨てずに包みます。「未存在」と「権限不足・ストレージ障害」がどちらも
+		// ErrNotFound になる以上、後者を切り分ける手がかりがログにも残らないと、
+		// 状態が出ない原因の調査が総当たりになるためです。
+		return status, fmt.Errorf("%w: %s: %w", ErrNotFound, safeJobID, err)
 	}
 	defer func() { _ = rc.Close() }()
 

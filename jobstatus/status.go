@@ -62,6 +62,34 @@ func (s *Status) Stamp(jobID string, now time.Time) {
 	s.UpdatedAt = now
 }
 
+// Common は、埋め込まれた共通フィールドをそのまま返します。
+//
+// Status を埋め込んだサービス固有の型から、共通部分だけを型引数なしで取り出すための
+// ものです（埋め込みによりメソッドが昇格するため、利用側の実装は要りません）。
+func (s Status) Common() Status {
+	return s
+}
+
+// CarryOver は、前回の記録から引き継ぐべき共通フィールドを取り込みます。
+//
+// ワーカーは状態が変わるたびにタスクから状態を組み立て直すため、これが無いと
+// 再試行のたびに試行回数と投入時刻が失われます。Title は、今回の組み立てで
+// 埋まっていない場合にだけ引き継ぎます（生成の途中で題目が確定するサービスが
+// あるため、新しく判明した題目を古い値で上書きしないようにするためです）。
+//
+// State・Error・UpdatedAt は引き継ぎません。いずれも「今回の記録」を表す値で、
+// 引き継ぐと成功後に古い失敗理由が残り続けます。
+func (s *Status) CarryOver(prev Status) {
+	s.Attempts = prev.Attempts
+	s.QueuedAt = prev.QueuedAt
+	if s.Title == "" {
+		s.Title = prev.Title
+	}
+	if s.Command == "" {
+		s.Command = prev.Command
+	}
+}
+
 // EnsureJobID は、JobID が空のときだけ補います。
 // job_id を持たない古い記録を読んだときに、呼び出し側が ID 無しの構造体を
 // 受け取らないようにするためのものです。
