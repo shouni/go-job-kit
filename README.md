@@ -143,23 +143,16 @@ rec.Record(ctx, task.JobID, newStatus(task, jobstatus.StateRunning), func(next, 
 
 `Recorder` が受け取るのは `StatusStore[T]` インターフェースで、`*jobstatus.Store[T]` はそのまま渡せます。
 
-ジョブ ID を状態に含める形の port（`Save(ctx, status)` / `Get(...) (*T, error)`）を保ちたい場合は、薄いアダプタを挟んでください。利用側 3 サービスはいずれもこの形だったため、同じアダプタを各自が持っています。
-
 ```go
-type portStatusStore struct{ store ports.JobStatusStore }
-
-func (p portStatusStore) Get(ctx context.Context, jobID string) (JobStatus, error) {
-    status, err := p.store.Get(ctx, jobID)
-    if err != nil {
-        return JobStatus{}, err
-    }
-    return *status, nil
-}
-
-func (p portStatusStore) Save(ctx context.Context, _ string, status JobStatus) error {
-    return p.store.Save(ctx, status)
+type StatusStore[T any] interface {
+    Get(ctx context.Context, jobID string) (T, error)
+    Save(ctx context.Context, jobID string, status T) error
 }
 ```
+
+アプリ側に状態保存の port を置いている場合は、**この形に揃えておくことをおすすめします**。揃えておけば `*jobstatus.Store[T]` がそのまま port の実装になり、間に何も挟まずに済みます。
+
+揃えなかった場合に必要になるのは薄いアダプタ 1 つですが、利用側が増えるとその数だけ同じものが増えます（実際、ジョブ ID を状態に含める形 `Save(ctx, status)` を保っていた 3 サービスが、同じアダプタをそれぞれ持つことになりました）。
 
 ### API 一覧
 

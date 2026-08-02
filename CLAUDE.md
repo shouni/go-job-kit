@@ -7,10 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 All three packages (`paging`, `jobstatus`, `cache`) are implemented and tested, released as
 v1.0.2, and consumed by `ap-comp`, `ap-mv` and `ap-comic` — all three pinned to v1.0.2.
 
-**Every exported entry point now has a consumer.** `jobstatus.Store`, `jobstatus.Recorder`,
-`paging.SelectIDs`, `paging.LoadPage` and `cache.TTL` are used by all three apps; `cache.IDList`
-by `ap-comp` and `ap-mv` (`ap-comic` has no job-ID list cache at all — see below). Nothing here
-is speculative any more, which is worth keeping true: an API with no caller cannot tell you
+**Every exported entry point is used by all three apps** — `jobstatus.Store`,
+`jobstatus.Recorder`, `paging.SelectIDs`, `paging.LoadPage`, `cache.TTL`, `cache.IDList`.
+Nothing here is speculative, which is worth keeping true: an API with no caller cannot tell you
 whether its shape is right.
 
 **The API is load-bearing.** A breaking change here means a migration in three services,
@@ -89,17 +88,16 @@ newest-first; that was corrected in the same release to say it holds only for si
 
 The scaffolding the three apps duplicated after adopting v1.0.1 — status recorder, job-ID list
 cache, concurrent page load — has all moved here (`jobstatus.Recorder`, `cache.IDList`,
-`paging.LoadPage`). Three things from that migration are still worth knowing:
+`paging.LoadPage`). Two results of that migration still constrain things:
 
-- **Every consumer needed the same adapter.** Their store port is `Save(ctx, status)` /
-  `Get(ctx, jobID) (*T, error)`; `StatusStore` is `Save(ctx, jobID, status)` with a value return.
-  Each app carries a 12-line `portStatusStore`. Written three times, it is a sign the shapes
-  should converge — decide that before a fourth service writes it again.
+- **Their `JobStatusStore` port is now `StatusStore`'s shape** (`Save(ctx, jobID, status)`,
+  value return). Each app briefly carried a 12-line adapter to bridge the two; writing it three
+  times was the argument for moving the port instead. `*jobstatus.Store[T]` now satisfies the
+  port directly, so none of them wraps it any more. Keep the shapes aligned — a divergence here
+  reintroduces three adapters, not one.
 - **`ap-comp`'s success record now inherits `Title`.** It used to carry `Attempts`/`QueuedAt` but
   not `Title`; `CarryOver`'s fill-when-empty rule means a success recorded without one picks up
   the running record's. Judged an improvement (the title settles mid-generation), not reverted.
-- **`ap-comic` still has no job-ID list cache** and re-lists `comics/` on every history request.
-  A gap in `ap-comic` rather than duplication to absorb, but the remaining item on this list.
 
 ## Architecture
 
