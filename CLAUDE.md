@@ -60,21 +60,29 @@ reproduced, so do not reintroduce them as caller options:
 3. `ap-comp` and `ap-comic` ran `go cache.Start()` on their ttlcaches; `ap-mv` never did, so its
    expired entries were never reclaimed. `cache.NewTTL` starts the janitor itself, which is why
    it also owns `Close`.
-4. `ap-mv` sorts history by a timestamp extracted from the job ID, the others sort the ID
-   lexically — **this one is not drift**. See below.
+4. `ap-mv` sorted history by a timestamp extracted from the job ID, the others sorted the ID
+   lexically — **this one was not drift**. All three now extract the timestamp via
+   `jobid.SortKey`. See below.
 
-`paging`'s default lexical sort is only correct when job IDs share a single prefix.
-`ap-comp` (`{timestamp}-{uuid8}`, no prefix) and `ap-comic` (`c{timestamp}-{hex8}`, one fixed
-prefix) satisfy that. `ap-mv` builds IDs with `jobid.New`, whose format is
-`{prefix}-{timestamp}-{rand}`, and uses seven prefixes (`video-recipe`, `recipe`, `mv`, `short`,
-`regen-keyframe`, `regen-section`, `regen-zip`) — so lexical order groups by prefix and puts
-older jobs first. `ap-mv` must pass `paging.WithSortKey`.
+`paging`'s default lexical sort is only correct when job IDs share a single prefix, and this
+has now stopped holding for every app — **all three must pass `paging.WithSortKey(jobid.SortKey)`**.
 
-Since `go-utils` v1.5.0 the key to pass is `jobid.SortKey` — no app needs to hand-roll the
-extraction. It reads all three formats above, so it is also the right key once IDs minted by one
-service start appearing in another's list (they already cross via `ap-mcp`). `jobid.New`'s doc
-comment used to claim lexical sort always yields newest-first; that was corrected in the same
-release to say it holds only for single-prefix use.
+`ap-mv` always had to: it builds IDs with `jobid.New` (`{prefix}-{timestamp}-{rand}`) across
+seven prefixes (`video-recipe`, `recipe`, `mv`, `short`, `regen-keyframe`, `regen-section`,
+`regen-zip`), so lexical order groups by prefix and puts older jobs first.
+
+`ap-comic` moved to `jobid.New("c")` after `go-utils` v1.5.0, changing its format from
+`c{timestamp}-{hex8}` to `c-{timestamp}-{hex12}`. Lexical order now splits old from new
+regardless of date — `-` (0x2D) sorts below `2` (0x32), so every newly minted ID lands *after*
+every legacy one. Old jobs stay in GCS indefinitely, so the two formats coexist for good.
+
+`ap-comp` (`{timestamp}-{uuid8}`, no prefix) is the only one whose own IDs still sort lexically,
+but it accepts caller-supplied `job_id` and receives IDs from other services via `ap-mcp`, so it
+uses the sort key too.
+
+`jobid.SortKey` (added in `go-utils` v1.5.0) reads all of these formats, so no app hand-rolls the
+extraction any more. `jobid.New`'s doc comment used to claim lexical sort always yields
+newest-first; that was corrected in the same release to say it holds only for single-prefix use.
 
 ## What the apps can hand over next
 
