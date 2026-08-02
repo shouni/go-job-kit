@@ -195,9 +195,13 @@ type PageMeta struct {
 
 用途ごとに異なるプレフィックスを付けた ID が同じ一覧に混在すると、文字列比較はプレフィックス順になってしまいます（時刻部分より前に差が出るため）。その場合は埋め込まれたタイムスタンプを取り出す関数を渡してください。
 
+`go-utils/jobid` の `SortKey` がそのまま使えます。`jobid.New` が生成する形式に加えて、各サービスが独自採番していた形式も読めるため、発行元の違う ID が混在する一覧でも並び順が崩れません。
+
 ```go
-ids, meta := paging.SelectIDs(jobIDs, page, perPage, paging.WithSortKey(embeddedTimestamp))
+ids, meta := paging.SelectIDs(jobIDs, page, perPage, paging.WithSortKey(jobid.SortKey))
 ```
+
+時刻を取り出せない ID では `SortKey` が空文字を返し、降順では末尾に回ります。
 
 ### ページ分を並行に読み込む
 
@@ -205,7 +209,7 @@ ids, meta := paging.SelectIDs(jobIDs, page, perPage, paging.WithSortKey(embedded
 
 ```go
 items, meta, err := paging.LoadPage(ctx, jobIDs, page, perPage, repo.loadHistory,
-    paging.WithSortKey(embeddedTimestamp), // SelectIDs と同じオプションが使えます
+    paging.WithSortKey(jobid.SortKey), // SelectIDs と同じオプションが使えます
     paging.WithConcurrency(10),            // 既定は 10
 )
 ```

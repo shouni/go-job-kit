@@ -68,8 +68,13 @@ reproduced, so do not reintroduce them as caller options:
 prefix) satisfy that. `ap-mv` builds IDs with `jobid.New`, whose format is
 `{prefix}-{timestamp}-{rand}`, and uses seven prefixes (`video-recipe`, `recipe`, `mv`, `short`,
 `regen-keyframe`, `regen-section`, `regen-zip`) — so lexical order groups by prefix and puts
-older jobs first. `ap-mv` must pass `paging.WithSortKey`. Note that `jobid.New`'s doc comment in
-`go-utils` claims lexical sort always yields newest-first; that holds only for single-prefix use.
+older jobs first. `ap-mv` must pass `paging.WithSortKey`.
+
+Since `go-utils` v1.5.0 the key to pass is `jobid.SortKey` — no app needs to hand-roll the
+extraction. It reads all three formats above, so it is also the right key once IDs minted by one
+service start appearing in another's list (they already cross via `ap-mcp`). `jobid.New`'s doc
+comment used to claim lexical sort always yields newest-first; that was corrected in the same
+release to say it holds only for single-prefix use.
 
 ## What the apps can hand over next
 
