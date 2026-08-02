@@ -76,9 +76,12 @@ seven prefixes (`video-recipe`, `recipe`, `mv`, `short`, `regen-keyframe`, `rege
 regardless of date — `-` (0x2D) sorts below `2` (0x32), so every newly minted ID lands *after*
 every legacy one. Old jobs stay in GCS indefinitely, so the two formats coexist for good.
 
-`ap-comp` (`{timestamp}-{uuid8}`, no prefix) is the only one whose own IDs still sort lexically,
-but it accepts caller-supplied `job_id` and receives IDs from other services via `ap-mcp`, so it
-uses the sort key too.
+`ap-comp` moved to `jobid.New("comp")` in the same round, from an unprefixed
+`{timestamp}-{uuid8}`. Its own IDs happen to keep sorting correctly — a letter outranks a digit,
+so every new ID lands above every legacy one, and every new job really is newer — but that is a
+coincidence of the prefix's first byte, not a property to rely on. It also accepts
+caller-supplied `job_id` and receives IDs from other services via `ap-mcp`, which breaks the
+coincidence outright.
 
 `jobid.SortKey` (added in `go-utils` v1.5.0) reads all of these formats, so no app hand-rolls the
 extraction any more. `jobid.New`'s doc comment used to claim lexical sort always yields

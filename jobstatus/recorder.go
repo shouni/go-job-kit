@@ -2,6 +2,7 @@ package jobstatus
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 )
 
@@ -61,6 +62,8 @@ func WithLogger(logger *slog.Logger) RecorderOption {
 // 何もしません）。状態の記録を任意機能として組み込めるようにするためのもので、
 // 利用側が呼び出しのたびに nil を確かめる必要はありません。
 func NewRecorder[T any](store StatusStore[T], opts ...RecorderOption) *Recorder[T] {
+	mustNotBePointer[T]("NewRecorder")
+
 	cfg := recorderOptions{logger: slog.Default()}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -81,26 +84,43 @@ func (r *Recorder[T]) Enabled() bool {
 //
 // Cloud Tasks は at-least-once 配信なので、通知の失敗などでワーカーがエラーを返すと
 // 同じタスクが再配信されます。生成をまるごと呼び直すと生成コストがそのまま二重に
-// 発生するため、完了済みならワーカー側でここで打ち切ります。
+// 発生するため、完了済みならワーカー側でここで打ち切ってください。
 //
-// 未記録・読み取り失敗はいずれも「完了していない」とみなします。状態を読めないことを
-// 理由に生成を止めるほうが害が大きいためです。
+//	done, err := rec.AlreadySucceeded(ctx, task.JobID)
+//	if err != nil {
+//	    return err // 判定できないので再配信に委ねる
+//	}
+//	if done {
+//	    return nil
+//	}
+//
+// 未記録（ErrNotFound）は「完了していない」として false を返します。記録が無いのは
+// 記録前の投入やこの機能より前のジョブでも起こる、正常な状態だからです。
+//
+// 状態を読めなかった場合（ErrUnavailable）はエラーを返します。ここで false に倒すと
+// 完了済みのジョブを未完了と誤認して生成をやり直し、このガードが防ぐはずのコストを
+// ガード自身が発生させます。逆に true に倒すと、未完了のジョブを完了扱いにして
+// タスクを ACK してしまい、そのジョブは二度と実行されません。どちらへ倒しても
+// 誤りうるので判断を返し、呼び出し側がエラーを返して再配信に委ねられるようにします。
 //
 // これはジョブ単位のガードです。処理を継続タスクへ分割して実行する場合、その途中
 // （state=running）での再配信までは防げません。
-func (r *Recorder[T]) AlreadySucceeded(ctx context.Context, jobID string) bool {
+func (r *Recorder[T]) AlreadySucceeded(ctx context.Context, jobID string) (bool, error) {
 	if !r.Enabled() {
-		return false
+		return false, nil
 	}
 
 	status, err := r.store.Get(ctx, jobID)
 	if err != nil {
-		return false
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		return false, err
 	}
 	if terminal, ok := any(&status).(interface{ IsTerminal() bool }); ok {
-		return terminal.IsTerminal()
+		return terminal.IsTerminal(), nil
 	}
-	return false
+	return false, nil
 }
 
 // Record は、前回の記録から共通フィールドを引き継いだうえで status を保存します。

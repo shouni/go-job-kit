@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -128,6 +130,25 @@ func TestGetReturnsNotFoundForUnknownJob(t *testing.T) {
 	_, err := newStore(newMemStore()).Get(context.Background(), testJobID)
 	if !errors.Is(err, jobstatus.ErrNotFound) {
 		t.Fatalf("Get() error = %v, want ErrNotFound", err)
+	}
+}
+
+// 未存在以外の読み取り失敗は ErrNotFound と区別すること。
+//
+// 両者を同じ扱いにすると、ストレージ障害中に完了済みジョブが「未記録」と読めてしまい、
+// Recorder.AlreadySucceeded が生成をやり直します。
+func TestGetDistinguishesUnavailableFromNotFound(t *testing.T) {
+	t.Parallel()
+
+	store := newMemStore()
+	store.openErr = errors.New("permission denied")
+
+	_, err := newStore(store).Get(context.Background(), testJobID)
+	if !errors.Is(err, jobstatus.ErrUnavailable) {
+		t.Fatalf("Get() error = %v, want ErrUnavailable", err)
+	}
+	if errors.Is(err, jobstatus.ErrNotFound) {
+		t.Error("読み取り失敗が ErrNotFound にも一致しています。呼び出し側が 404 と取り違えます")
 	}
 }
 
@@ -318,6 +339,8 @@ func TestUnderJobDirRejectsEmptyBase(t *testing.T) {
 
 // memStore は remoteio.Reader / remoteio.OutputWriter のインメモリ実装です。
 type memStore struct {
+	// openErr は未存在以外の読み取り失敗（権限不足・障害）を再現します。
+	openErr  error
 	mu       sync.Mutex
 	files    map[string][]byte
 	optCount map[string]int
@@ -331,9 +354,14 @@ func (m *memStore) Open(_ context.Context, path string) (io.ReadCloser, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.openErr != nil {
+		return nil, m.openErr
+	}
 	data, ok := m.files[path]
 	if !ok {
-		return nil, io.ErrUnexpectedEOF
+		// remoteio は未存在を os.ErrNotExist に包んで返します。fake もそれに合わせないと、
+		// 「未存在」と「読めない」を取り違えたまま通ってしまいます。
+		return nil, fmt.Errorf("オブジェクトが見つかりません (%s): %w", path, os.ErrNotExist)
 	}
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
@@ -367,4 +395,38 @@ func (m *memStore) keys() []string {
 		paths = append(paths, path)
 	}
 	return paths
+}
+
+// 型引数にポインタ型を渡した場合、データを書く前に落とすこと。
+//
+// Store[*T] は Go として自然に書けてしまいますが、Save が any(&status) を Stamper へ
+// アサートする都合上、対象が **T になって一致しません。その結果 job_id が空で
+// updated_at がゼロ値の状態ファイルが、エラーもログも無しに書かれます。
+// 静かに壊れるより、構築時に落ちるほうが被害が小さいためガードしています。
+func TestNewStoreRejectsPointerTypeParameter(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("NewStore[*appStatus] が panic しませんでした。silent no-op になります")
+		}
+		if !strings.Contains(fmt.Sprint(r), "NewStore") {
+			t.Errorf("panic メッセージに関数名が含まれていません: %v", r)
+		}
+	}()
+
+	_ = jobstatus.NewStore[*appStatus](newMemStore(), newMemStore(), jobstatus.UnderJobDir("gs://b/jobs"))
+}
+
+// 埋め込みの無い型は従来どおり許容すること（打刻・引き継ぎが行われないだけ）。
+func TestNewStoreAllowsTypeWithoutEmbeddedStatus(t *testing.T) {
+	t.Parallel()
+
+	type bare struct {
+		Note string `json:"note"`
+	}
+	if got := jobstatus.NewStore[bare](newMemStore(), newMemStore(), jobstatus.UnderJobDir("gs://b/jobs")); got == nil {
+		t.Fatal("NewStore[bare]() = nil")
+	}
 }
