@@ -13,6 +13,11 @@ in particular cannot be relaxed without touching stored data: `jobstatus.Status`
 the consumers so its JSON stays flat (see below), and `paging.PageMeta`'s tags are what their
 HTTP responses already return.
 
+Unreleased on top of v1.0.1 (tag as v1.1.0): `jobstatus.Recorder`, `cache.IDList`,
+`paging.LoadPage`. All three are additive — v1.0.1 call sites compile unchanged. Each one
+absorbs scaffolding the three apps still carry after adopting v1.0.1; see "What the apps
+can hand over next" below. Nothing in the apps uses them yet.
+
 ## Commands
 
 ```bash
@@ -66,6 +71,33 @@ prefix) satisfy that. `ap-mv` builds IDs with `jobid.New`, whose format is
 older jobs first. `ap-mv` must pass `paging.WithSortKey`. Note that `jobid.New`'s doc comment in
 `go-utils` claims lexical sort always yields newest-first; that holds only for single-prefix use.
 
+## What the apps can hand over next
+
+Adopting v1.0.1 moved the storage format, ID normalization and page arithmetic here, but left
+three pieces of scaffolding duplicated in all three `internal/` trees. The unreleased additions
+above exist to absorb them. The apps still have to be migrated — none of this has happened yet.
+
+1. **`statusRecorder`** — `ap-comp/internal/pipeline/job_status.go`,
+   `ap-mv/internal/worker/pipeline/job_status.go`, `ap-comic/internal/pipeline/job_status.go`.
+   Same three behaviours in each (terminal guard, carry over `Attempts`/`QueuedAt`/`Title` from
+   the previous record, warn-and-continue on save failure), ~110 lines apiece.
+   → `jobstatus.Recorder`. The apps' `ports.JobStatusStore` is `Save(ctx, status)` /
+   `Get(ctx, jobID) (*T, error)`; `jobstatus.StatusStore` matches `*jobstatus.Store` instead
+   (`Save(ctx, jobID, status)`, value return), so a port-shaped store needs a ~10-line adapter.
+   Note `ap-comic` carries `Title` over unconditionally while the others only fill it when
+   empty; `Status.CarryOver` uses the fill-when-empty rule and `ap-comic`'s `markSucceeded`
+   sets its title through `apply` afterwards, so the outcome is unchanged.
+2. **Job ID list cache** — `ap-comp/internal/repository/history_query.go`,
+   `ap-mv/internal/repository/job_id_cache.go`. Both wrap a `ttlcache` of `[]string` with a
+   1-minute TTL, clone-on-read and explicit invalidation. `ap-comic` has no such cache and
+   re-lists `comics/` on every history request. → `cache.IDList`.
+3. **Concurrent page load** — `listHistoryPage` in `ap-comp`, `buildHistoriesConcurrently` in
+   `ap-comic`, inline in `ap-mv`'s `ListHistoryPage`. → `paging.LoadPage`. `ap-comp` and
+   `ap-comic` write into an indexed slice to keep the order; `ap-mv` appends under a mutex and
+   then re-sorts by the same key it passed to `WithSortKey` — the ordering rule written out
+   twice, in two places that have to stay in step. `LoadPage` keeps `SelectIDs`' order by
+   construction, so `ap-mv`'s mutex and re-sort both go away.
+
 ## Architecture
 
 Packages sit at the repository root (`jobstatus/`, `paging/`, `cache/`) — no `pkg/` prefix.
@@ -84,6 +116,11 @@ Design constraints that are not visible from any single file:
   flattens embedded structs in JSON. Do not introduce a nested payload field.
 - **Status records keep one generation only** — overwritten in place, written with `no-store` so
   CDN and browsers do not cache them.
+- **A missing status and an unreadable one are the same error.** `remoteio` does not type its
+  not-found, so `Store.Get` maps every read failure to `ErrNotFound` — handlers 404 rather than
+  500 during a GCS outage, and the retry guard treats "cannot read" as "not finished". Both are
+  deliberate (continuing beats stalling), but `Get` wraps the underlying error alongside
+  `ErrNotFound` so the distinction survives into logs. Do not collapse that wrapping.
 - **No app domain types.** Music, video, and comic result types stay in their own repositories.
   This library handles state and IDs. Auth, HTTP, and notification concerns belong to `gcp-kit`,
   `go-http-kit`, and `go-notifier` respectively.

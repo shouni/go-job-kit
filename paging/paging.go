@@ -6,6 +6,7 @@ package paging
 
 import (
 	"cmp"
+	"log/slog"
 	"slices"
 )
 
@@ -31,10 +32,15 @@ type PageMeta struct {
 type SortKeyFunc func(jobID string) string
 
 type options struct {
-	sortKey SortKeyFunc
+	sortKey     SortKeyFunc
+	concurrency int
+	logger      *slog.Logger
 }
 
-// Option は SelectIDs の挙動を変更します。
+// Option は SelectIDs / LoadPage の挙動を変更します。
+//
+// どのオプションがどちらに効くかは、それぞれのドキュメントを参照してください
+// （SelectIDs は並べ替えだけを行うため、読み込みに関するオプションは無視します）。
 type Option func(*options)
 
 // WithSortKey は、ジョブ ID そのものではなく、そこから取り出した文字列で並べ替えます。
