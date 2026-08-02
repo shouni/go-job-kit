@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -19,6 +21,16 @@ import (
 // 呼び出し側がストレージ障害と区別できるよう独立したエラーにしています。
 // HTTP ハンドラーはこれを 404 に、それ以外を 500 にマップしてください。
 var ErrNotFound = errors.New("job status not found")
+
+// ErrUnavailable は、ジョブ状態が「存在するはずなのに読めなかった」ことを表します。
+//
+// ErrNotFound と分けているのは、両者で取るべき判断が正反対だからです。記録が無いなら
+// 処理を進めてよい一方、読めなかっただけの場合に「無い」とみなすと、完了済みのジョブを
+// 未完了と誤認して生成をまるごとやり直します（Recorder.AlreadySucceeded を参照）。
+//
+// 切り分けは remoteio が返す os.ErrNotExist で行います。追加のストレージ往復は不要です。
+// HTTP ハンドラーは ErrNotFound を 404 に、これを 503（または 500）にマップしてください。
+var ErrUnavailable = errors.New("job status unavailable")
 
 // contentType はジョブ状態 JSON の Content-Type です。
 const contentType = "application/json; charset=utf-8"
@@ -56,10 +68,34 @@ type Store[T any] struct {
 	now    func() time.Time
 }
 
+// mustNotBePointer は、型引数にポインタ型を渡す誤用を構築時に弾きます。
+//
+// Status の埋め込みは値型 T のメソッド集合を通して見つけます（Save は any(&status) を
+// Stamper へアサートします）。T が *X だとアサート対象が **X になり、Stamper も Carrier も
+// IsTerminal も満たしません。その結果、打刻されず・引き継がれず・再実行ガードが常に
+// false になった状態ファイルが、エラーもログも無しに書かれます。
+//
+// Store[*X] は Go として自然に書けてしまい、しかも壊れ方が静かなので、データを
+// 書く前に落とします。埋め込みの無い型（T = X で Stamper を満たさない）は doc の
+// とおり引き続き許容します。そちらは打刻も引き継ぎも行われないだけで、誤って
+// 静かに壊れるわけではないためです。
+func mustNotBePointer[T any](fn string) {
+	var zero T
+	if reflect.TypeOf(&zero).Elem().Kind() == reflect.Pointer {
+		panic(fmt.Sprintf(
+			"jobstatus: %s[%T]: 型引数にポインタ型を渡さないでください。"+
+				"打刻・引き継ぎ・再実行ガードが無効になります（値型で instantiate してください）", fn, zero))
+	}
+}
+
 // NewStore は Store を構築します。
 //
 // reader / writer は remoteio.InputReader / remoteio.OutputWriter をそのまま渡せます。
+//
+// 型引数にポインタ型を渡した場合は panic します（mustNotBePointer を参照）。
 func NewStore[T any](reader remoteio.Reader, writer remoteio.OutputWriter, locate Locator) *Store[T] {
+	mustNotBePointer[T]("NewStore")
+
 	return &Store[T]{
 		reader: reader,
 		writer: writer,
@@ -118,13 +154,15 @@ func (s *Store[T]) Get(ctx context.Context, jobID string) (T, error) {
 
 	rc, err := s.reader.Open(ctx, uri)
 	if err != nil {
-		// remoteio は「未存在」を型付きで返さないため、読めなかった時点で未記録とみなします。
-		// 状態の欠落で処理を止めるより、記録が無いものとして先へ進めるほうが安全です。
-		//
-		// ただし原因は捨てずに包みます。「未存在」と「権限不足・ストレージ障害」がどちらも
-		// ErrNotFound になる以上、後者を切り分ける手がかりがログにも残らないと、
-		// 状態が出ない原因の調査が総当たりになるためです。
-		return status, fmt.Errorf("%w: %s: %w", ErrNotFound, safeJobID, err)
+		// remoteio は未存在を os.ErrNotExist に包んで返します（GCS は
+		// storage.ErrObjectNotExist、S3 は NoSuchKey、ローカルは os.Open がそのまま）。
+		// これで「記録が無い」と「あるのに読めない」を追加の往復なしに切り分けられます。
+		if errors.Is(err, os.ErrNotExist) {
+			return status, fmt.Errorf("%w: %s: %w", ErrNotFound, safeJobID, err)
+		}
+		// 権限不足・ストレージ障害・ネットワーク断。「無い」と誤認すると、完了済みの
+		// ジョブを未完了とみなして生成をやり直すため、別のエラーとして返します。
+		return status, fmt.Errorf("%w: %s: %w", ErrUnavailable, safeJobID, err)
 	}
 	defer func() { _ = rc.Close() }()
 

@@ -3,6 +3,7 @@ package jobstatus_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -196,7 +197,11 @@ func TestRecorderWithoutStore(t *testing.T) {
 		t.Error("Enabled() = true, want false")
 	}
 	rec.Record(context.Background(), testJobID, appStatus{})
-	if rec.AlreadySucceeded(context.Background(), testJobID) {
+	done, err := rec.AlreadySucceeded(context.Background(), testJobID)
+	if err != nil {
+		t.Errorf("AlreadySucceeded() error = %v, want nil", err)
+	}
+	if done {
 		t.Error("AlreadySucceeded() = true, want false")
 	}
 }
@@ -223,23 +228,56 @@ func TestAlreadySucceeded(t *testing.T) {
 			store.saved[testJobID] = appStatus{Status: jobstatus.Status{State: tt.state}}
 
 			rec := jobstatus.NewRecorder(store)
-			if got := rec.AlreadySucceeded(context.Background(), testJobID); got != tt.want {
+			got, err := rec.AlreadySucceeded(context.Background(), testJobID)
+			if err != nil {
+				t.Fatalf("AlreadySucceeded() error = %v, want nil", err)
+			}
+			if got != tt.want {
 				t.Errorf("AlreadySucceeded() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-// 状態を読めないことを理由に生成を止めない（未記録・読み取り失敗はいずれも続行）。
+// 未記録は「完了していない」として続行できること。記録前の投入やこの機能より前の
+// ジョブでも起こる正常な状態なので、エラーにはしない。
+func TestAlreadySucceededWhenNotRecorded(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore()
+	store.getErr = fmt.Errorf("%w: 未記録", jobstatus.ErrNotFound)
+
+	rec := jobstatus.NewRecorder(store)
+	done, err := rec.AlreadySucceeded(context.Background(), testJobID)
+	if err != nil {
+		t.Fatalf("AlreadySucceeded() error = %v, want nil（未記録は正常）", err)
+	}
+	if done {
+		t.Error("AlreadySucceeded() = true, want false")
+	}
+}
+
+// 状態を読めなかった場合はエラーを返すこと。
+//
+// false に倒すと完了済みジョブを再生成してしまい、このガードが防ぐはずのコストを
+// ガード自身が発生させます。true に倒すと未完了のジョブが二度と実行されません。
+// どちらへも倒さず、呼び出し側が再配信に委ねられるようにします。
 func TestAlreadySucceededOnReadFailure(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeStore()
-	store.getErr = errors.New("storage down")
+	store.getErr = fmt.Errorf("%w: storage down", jobstatus.ErrUnavailable)
 
 	rec := jobstatus.NewRecorder(store)
-	if rec.AlreadySucceeded(context.Background(), testJobID) {
-		t.Error("AlreadySucceeded() = true, want false（読めないなら未完了とみなす）")
+	done, err := rec.AlreadySucceeded(context.Background(), testJobID)
+	if err == nil {
+		t.Fatal("AlreadySucceeded() error = nil, want error（読めないなら判断を返す）")
+	}
+	if !errors.Is(err, jobstatus.ErrUnavailable) {
+		t.Errorf("error = %v, want wrapping ErrUnavailable", err)
+	}
+	if done {
+		t.Error("AlreadySucceeded() = true, want false")
 	}
 }
 
@@ -256,7 +294,11 @@ func TestRecordWithoutEmbeddedStatus(t *testing.T) {
 	if got := store.saved[testJobID].Note; got != "今回" {
 		t.Errorf("Note = %q, want %q", got, "今回")
 	}
-	if rec.AlreadySucceeded(context.Background(), testJobID) {
+	done, err := rec.AlreadySucceeded(context.Background(), testJobID)
+	if err != nil {
+		t.Fatalf("AlreadySucceeded() error = %v, want nil", err)
+	}
+	if done {
 		t.Error("AlreadySucceeded() = true, want false（終了判定を持たない型）")
 	}
 }
