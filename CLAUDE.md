@@ -6,19 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 All three packages (`paging`, `jobstatus`, `cache`) are implemented and tested, released as
 v1.0.2, and consumed by `ap-comp`, `ap-mv` and `ap-comic` — all three pinned to v1.0.2.
-`jobstatus.Store`, `paging.SelectIDs`, `paging.LoadPage` and `cache.TTL` are used by all three;
-`jobstatus.Recorder` and `cache.IDList` are not used by anything yet (see below).
 
-**The API is now load-bearing.** A breaking change here means a migration in three services,
+**Every exported entry point now has a consumer.** `jobstatus.Store`, `jobstatus.Recorder`,
+`paging.SelectIDs`, `paging.LoadPage` and `cache.TTL` are used by all three apps; `cache.IDList`
+by `ap-comp` and `ap-mv` (`ap-comic` has no job-ID list cache at all — see below). Nothing here
+is speculative any more, which is worth keeping true: an API with no caller cannot tell you
+whether its shape is right.
+
+**The API is load-bearing.** A breaking change here means a migration in three services,
 so add to the surface rather than reshaping it, and tag a new minor when you do. Two constraints
 in particular cannot be relaxed without touching stored data: `jobstatus.Status` is embedded by
 the consumers so its JSON stays flat (see below), and `paging.PageMeta`'s tags are what their
 HTTP responses already return.
-
-Unreleased on top of v1.0.1 (tag as v1.1.0): `jobstatus.Recorder`, `cache.IDList`,
-`paging.LoadPage`. All three are additive — v1.0.1 call sites compile unchanged. Each one
-absorbs scaffolding the three apps still carry after adopting v1.0.1; see "What the apps
-can hand over next" below. Nothing in the apps uses them yet.
 
 ## Commands
 
@@ -86,42 +85,21 @@ uses the sort key too.
 extraction any more. `jobid.New`'s doc comment used to claim lexical sort always yields
 newest-first; that was corrected in the same release to say it holds only for single-prefix use.
 
-## What the apps can hand over next
+## What the apps handed over
 
-Adopting v1.0.1 moved the storage format, ID normalization and page arithmetic here, but left
-three pieces of scaffolding duplicated in all three `internal/` trees. One of the three has since
-been migrated; two are still outstanding.
+The scaffolding the three apps duplicated after adopting v1.0.1 — status recorder, job-ID list
+cache, concurrent page load — has all moved here (`jobstatus.Recorder`, `cache.IDList`,
+`paging.LoadPage`). Three things from that migration are still worth knowing:
 
-1. **`statusRecorder`** — *still duplicated.* `ap-comp/internal/pipeline/job_status.go`,
-   `ap-mv/internal/worker/pipeline/job_status.go`, `ap-comic/internal/pipeline/job_status.go`.
-   Same three behaviours in each (terminal guard, carry over `Attempts`/`QueuedAt`/`Title` from
-   the previous record, warn-and-continue on save failure), ~110 lines apiece.
-   → `jobstatus.Recorder`. The apps' `ports.JobStatusStore` is `Save(ctx, status)` /
-   `Get(ctx, jobID) (*T, error)`; `jobstatus.StatusStore` matches `*jobstatus.Store` instead
-   (`Save(ctx, jobID, status)`, value return), so a port-shaped store needs a ~10-line adapter.
-   Note `ap-comic` carries `Title` over unconditionally while the others only fill it when
-   empty; `Status.CarryOver` uses the fill-when-empty rule and `ap-comic`'s `markSucceeded`
-   sets its title through `apply` afterwards, so the outcome is unchanged.
-2. **Job ID list cache** — *still duplicated.* `ap-comp/internal/repository/history_query.go`,
-   `ap-mv/internal/repository/job_id_cache.go`. Both wrap a `ttlcache` of `[]string` with a
-   1-minute TTL, clone-on-read and explicit invalidation. `ap-comic` has no such cache and
-   re-lists `comics/` on every history request. → `cache.IDList`.
-3. **Concurrent page load** — **migrated.** All three now call `paging.LoadPage`
-   (`listHistoryPage` in `ap-comp`, `ListHistoryPage` in `ap-mv` and `ap-comic`), so the three
-   hand-rolled variants are gone. Two things came out of it that are worth keeping in mind when
-   migrating the remaining two items:
-
-   - `ap-mv` used to append under a mutex and then re-sort by the same key it passed to
-     `WithSortKey` — the ordering rule written out twice, in two places that had to stay in step.
-     `LoadPage` keeps `SelectIDs`' order by construction, so the mutex and the re-sort both went.
-   - `ap-comp` and `ap-mv` returned `nil` from every `errgroup` goroutine, so `eg.Wait()` never
-     reported anything: a cancelled context produced an empty or all-placeholder page that the
-     caller could not tell from a genuinely empty one. `LoadPage` checks `ctx.Err()` after the
-     wait. `ap-comic` already got this right and its behaviour is unchanged.
-
-   Each app keeps its own "show the row even though the read failed" rule by returning a
-   fallback value from `load` rather than an error — `LoadPage` drops the IDs whose `load`
-   errored, which is what makes both policies expressible without an option for it.
+- **Every consumer needed the same adapter.** Their store port is `Save(ctx, status)` /
+  `Get(ctx, jobID) (*T, error)`; `StatusStore` is `Save(ctx, jobID, status)` with a value return.
+  Each app carries a 12-line `portStatusStore`. Written three times, it is a sign the shapes
+  should converge — decide that before a fourth service writes it again.
+- **`ap-comp`'s success record now inherits `Title`.** It used to carry `Attempts`/`QueuedAt` but
+  not `Title`; `CarryOver`'s fill-when-empty rule means a success recorded without one picks up
+  the running record's. Judged an improvement (the title settles mid-generation), not reverted.
+- **`ap-comic` still has no job-ID list cache** and re-lists `comics/` on every history request.
+  A gap in `ap-comic` rather than duplication to absorb, but the remaining item on this list.
 
 ## Architecture
 

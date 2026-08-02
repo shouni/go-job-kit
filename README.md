@@ -141,7 +141,25 @@ rec.Record(ctx, task.JobID, newStatus(task, jobstatus.StateRunning), func(next, 
 | `Title` / `Command` | 今回が空のときだけ | 生成の途中で確定した題目を、古い値で上書きしない |
 | `State` / `Error` / `UpdatedAt` | しない | 「今回の記録」を表す値。成功後に古い失敗理由が残ってしまう |
 
-`Recorder` が受け取るのは `StatusStore[T]` インターフェースです。`*jobstatus.Store[T]` はそのまま渡せます。独自の port（`Save(ctx, status)` など）を保ちたい場合は、薄いアダプタを挟んでください。
+`Recorder` が受け取るのは `StatusStore[T]` インターフェースで、`*jobstatus.Store[T]` はそのまま渡せます。
+
+ジョブ ID を状態に含める形の port（`Save(ctx, status)` / `Get(...) (*T, error)`）を保ちたい場合は、薄いアダプタを挟んでください。利用側 3 サービスはいずれもこの形だったため、同じアダプタを各自が持っています。
+
+```go
+type portStatusStore struct{ store ports.JobStatusStore }
+
+func (p portStatusStore) Get(ctx context.Context, jobID string) (JobStatus, error) {
+    status, err := p.store.Get(ctx, jobID)
+    if err != nil {
+        return JobStatus{}, err
+    }
+    return *status, nil
+}
+
+func (p portStatusStore) Save(ctx context.Context, _ string, status JobStatus) error {
+    return p.store.Save(ctx, status)
+}
+```
 
 ### API 一覧
 
@@ -154,6 +172,7 @@ rec.Record(ctx, task.JobID, newStatus(task, jobstatus.StateRunning), func(next, 
 | 型 | `Store[T]` / `NewStore` | 保存 (`Save`)・取得 (`Get`)・削除 (`Delete`) |
 | 型 | `Locator` / `UnderJobDir` | 状態ファイルの配置 |
 | 型 | `Recorder[T]` / `NewRecorder` | 再実行ガード (`AlreadySucceeded`)・引き継ぎ付き記録 (`Record`) |
+| 型 | `StatusStore[T]` | `Recorder` が要求する読み書き。`*Store[T]` はそのまま満たす |
 | エラー | `ErrNotFound` | 未記録**および読み取り失敗**。404 へマップする前に、包まれた原因をログへ残す |
 
 ---
