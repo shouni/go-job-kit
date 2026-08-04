@@ -127,7 +127,7 @@ Design constraints that are not visible from any single file:
   `ErrNotFound` so the distinction survives into logs. Do not collapse that wrapping.
 - **No app domain types.** Music, video, and comic result types stay in their own repositories.
   This library handles state and IDs. Auth, HTTP, and notification concerns belong to `gcp-kit`,
-  `go-http-kit`, and `go-notifier` respectively.
+  `go-http-kit`, and `go-notify` respectively.
 
 ## Dependencies
 
