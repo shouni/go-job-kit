@@ -25,7 +25,7 @@
 | **投入** | HTTP ハンドラーが Cloud Tasks へ積み、`queued` を記録する | `jobstatus.Store` |
 | **実行** | ワーカーが `running` → `succeeded` / `failed` を記録する。再配信されたタスクはここで打ち切る | `jobstatus.Recorder` |
 | **参照** | UI・M2M クライアントが進行状況をポーリングする | `jobstatus.Store` |
-| **一覧** | 履歴画面がジョブ ID を集め、ページを切り出し、メタデータを読む | `paging` + `cache` |
+| **一覧** | 履歴画面がジョブ ID を集め、ページを切り出し、メタデータを読む | `joblist` + `paging` + `cache` |
 
 ---
 
@@ -34,6 +34,7 @@
 ```text
 go-job-kit/
 ├── jobstatus/   # ジョブ進行状況の記録・取得（Status / Store / Recorder）
+├── joblist/     # ストレージの疑似ディレクトリ走査からジョブ ID を収集（Collect）
 ├── paging/      # ジョブ ID 一覧の 1 始まりページング（SelectIDs / LoadPage / PageMeta）
 └── cache/       # インメモリキャッシュ（TTL / IDList）
 ```
@@ -88,16 +89,19 @@ err := store.Save(ctx, jobID, JobStatus{
 
 // UI・M2M クライアントから進行状況を追う
 status, err := store.Get(ctx, jobID)
-if errors.Is(err, jobstatus.ErrNotFound) {
-    // 未記録（記録前の投入、この機能より前に作られたジョブ）とは限らず、
-    // 読み取り失敗もここへ来ます。404 を返す前に、包まれた原因を残しておきます。
-    slog.WarnContext(ctx, "job status unavailable", "job_id", jobID, "error", err)
+switch {
+case errors.Is(err, jobstatus.ErrNotFound):
+    // 未記録。記録前の投入や、この機能より前に作られたジョブでも起こる正常系 → 404
+case errors.Is(err, jobstatus.ErrUnavailable):
+    // 存在するはずなのに読めない（権限不足・GCS 障害）→ 503。原因は err に包まれている
+case err != nil:
+    // 壊れた JSON など → 500
 }
 ```
 
-ここで注意が要るのは `ErrNotFound` の範囲です。`remoteio` は「未存在」を型付きで返さないため、`Get` は**読み取りに失敗した時点で未記録とみなします**。つまり状態ファイルがまだ無い場合と、権限不足や GCS 障害で読めなかった場合が、どちらも `ErrNotFound` になります。素直に 404 へマップすると、**障害中も 404 が返ります**。
+「未記録」（`ErrNotFound`）と「あるはずなのに読めない」（`ErrUnavailable`）は**別のエラー**で返ります。切り分けには `remoteio` が未存在を `os.ErrNotExist` に包んで返すことを使っていて、追加のストレージ往復はありません。
 
-これは意図した設計です。状態が読めないことを理由に処理を止めるより、記録が無いものとして先へ進めるほうが安全なためで、`Recorder.AlreadySucceeded` も同じ理由で「読めない = 未完了」に倒します。切り分けができるよう、原因のエラーは `ErrNotFound` と一緒に包んであります。`errors.Is(err, jobstatus.ErrNotFound)` は真のまま、`err` の文字列には元の失敗理由が残るので、上の例のようにログへ流してください。
+分けているのは、両者で取るべき判断が正反対だからです。記録が無いのは正常な状態なので先へ進んでよく、読めなかっただけの場合を「無い」とみなすと、完了済みのジョブを未完了と誤認して生成をまるごとやり直します（後述の `Recorder.AlreadySucceeded` を参照）。どちらのエラーにも原因のエラーが包んであるので、`errors.Is` の判定はそのままに、ログには元の失敗理由を残せます。
 
 配置を自分で決めたい場合は `Locator` を渡します。`UnderJobDir` は「成果物と同じジョブディレクトリ配下に置く」という既定の配置で、履歴削除（プレフィックスの一括削除）で状態ファイルも自動的に片付きます。
 
@@ -119,7 +123,11 @@ rec := jobstatus.NewRecorder(store) // store が nil なら記録は行われな
 // ── 再実行ガード ──
 // Cloud Tasks は at-least-once 配信です。通知の失敗などでワーカーがエラーを返すと
 // 同じタスクが再配信され、生成コストがそのまま二重に発生します。
-if rec.AlreadySucceeded(ctx, task.JobID) {
+done, err := rec.AlreadySucceeded(ctx, task.JobID)
+if err != nil {
+    return err // 状態を読めず判定できない。エラーを返して再配信に委ねる
+}
+if done {
     return nil
 }
 
@@ -132,6 +140,10 @@ rec.Record(ctx, task.JobID, newStatus(task, jobstatus.StateRunning), func(next, 
     }
 })
 ```
+
+再実行ガードは、未記録（`ErrNotFound`）を「完了していない」として false にします。一方、状態を**読めなかった**場合（`ErrUnavailable`）はエラーを返します。「未完了」に倒すと完了済みのジョブを作り直してガードが防ぐはずのコストを自分で発生させ、「完了済み」に倒すと未完了のジョブがタスクごと ACK されて二度と実行されないためで、どちらへも倒さず、呼び出し側が再配信に委ねられるようにしています。
+
+`Record` は前回の記録を読めなかったときも警告ログを残したうえで、引き継ぎ無しで記録します（保存の失敗と同じく、観測の欠けを理由に生成を止めません）。
 
 引き継ぎの規則は `Status.CarryOver` にまとまっています。
 
@@ -166,7 +178,43 @@ type StatusStore[T any] interface {
 | 型 | `Locator` / `UnderJobDir` | 状態ファイルの配置 |
 | 型 | `Recorder[T]` / `NewRecorder` | 再実行ガード (`AlreadySucceeded`)・引き継ぎ付き記録 (`Record`) |
 | 型 | `StatusStore[T]` | `Recorder` が要求する読み書き。`*Store[T]` はそのまま満たす |
-| エラー | `ErrNotFound` | 未記録**および読み取り失敗**。404 へマップする前に、包まれた原因をログへ残す |
+| エラー | `ErrNotFound` | 未記録（記録前の投入・この機能より前のジョブ）。404 へ |
+| エラー | `ErrUnavailable` | 存在するはずの状態を読めない（権限不足・障害）。503 へ。`AlreadySucceeded` はこれをエラーとして返す |
+
+---
+
+## 📇 `joblist` — ジョブ ID の収集
+
+一覧の入口です。「ジョブ 1 件 = プレフィックス直下のディレクトリ 1 つ」という配置から、疑似ディレクトリ名をジョブ ID として集めます。
+
+```go
+jobIDs, err := jobIDCache.Load(ctx, prefix, func(ctx context.Context) ([]string, error) {
+    return joblist.Collect(ctx, reader, prefix) // reader には remoteio.InputReader をそのまま渡せます
+})
+```
+
+区切り文字を指定して走査するため、ジョブ 1 件を 1 エントリとして受け取ります。指定しないと配下の成果物が全件返り、1 ジョブにつき成果物の数だけ結果を受け取ったうえで、呼び出し側で重複を潰すことになります。プレフィックス直下に直接置かれたオブジェクトは、ジョブではないため対象外です。
+
+拾えるのはディレクトリ名だけなので、メタデータの保存前に落ちたジョブも ID としては現れます。一覧に見せるか除くかは読み込み側の判断です（`LoadPage` のフォールバックの項を参照）。
+
+作業用ジョブの除外や ID 形式の検証は、オプションで差し込みます。
+
+```go
+jobIDs, err := joblist.Collect(ctx, reader, prefix,
+    joblist.WithValidIDsOnly(), // jobid.Validate を通る ID だけ
+    joblist.WithKeep(func(id string) bool { return !strings.HasPrefix(id, "regen-") }),
+)
+```
+
+返す並び順はストレージの列挙順のままです。「新しい順」への並べ替えとページ切り出しは、次の `paging` が担います。バケット全体の走査になるため、呼び出しは `cache.IDList` 越しに行うことを勧めます。
+
+### API 一覧
+
+| 種別 | シンボル | 説明 |
+| --- | --- | --- |
+| 関数 | `Collect(ctx, reader, prefix, opts...)` | 疑似ディレクトリ名をジョブ ID として収集する |
+| オプション | `WithKeep(fn)` | 集める ID を絞り込む（複数指定は AND） |
+| オプション | `WithValidIDsOnly()` | `jobid.Validate` を通る ID だけを集める |
 
 ---
 
@@ -274,6 +322,8 @@ if h, ok := histories.Get(jobID); ok {
 
 一覧走査そのもの（プレフィックス配下全体の `List`）は、これが無いと履歴画面を開くたびに走ります。保持期間はメタデータ本体より大幅に短く取り、新しく完成したジョブが一覧に現れるまでの遅延を最小にします。削除・追加は `Invalidate` で即座に反映させます。
 
+TTL が切れた瞬間に同じキーへのリクエストが重なっても、走査は 1 回だけ実行され、全員がその結果を共有します。待つのは自分の ctx の範囲だけで、走査を始めた呼び出しがキャンセルされても、待っていた側は巻き込まれずにやり直します。
+
 ```go
 jobIDCache := cache.NewIDList(time.Minute)
 
@@ -308,7 +358,7 @@ jobIDCache.Invalidate(prefix)
 
 4. **状態ファイルは常に最新の 1 世代のみ** — 状態は上書きで更新し、履歴は残しません。CDN・ブラウザにキャッシュさせないため `no-store` を付与します。
 
-5. **状態の記録に失敗しても生成は止めない** — `Recorder` は保存の失敗を警告ログに留め、呼び出し側へは伝えません。状態はあくまで観測のための記録であり、書けなかったことを理由に生成を中断するほうが害が大きいためです。同じ理由で、状態を*読めなかった*ときの再実行ガードは「未完了」側に倒します。
+5. **状態の記録に失敗しても生成は止めない** — `Recorder` は保存の失敗を警告ログに留め、呼び出し側へは伝えません。状態はあくまで観測のための記録であり、書けなかったことを理由に生成を中断するほうが害が大きいためです。一方、状態を*読めなかった*ときの再実行ガード（`AlreadySucceeded`）は「未完了」にも「完了済み」にも倒さずエラーを返し、呼び出し側が Cloud Tasks の再配信に委ねられるようにします（「未完了」とみなすのは未記録 `ErrNotFound` だけです）。
 
 6. **一覧の一部が読めなくてもページ全体は返す** — `LoadPage` は読み込みに失敗した ID を一覧から取り除き、`PageMeta` を実件数へ補正します。ただし `ctx` のキャンセル・期限切れはエラーとして返します。読み込みが軒並み失敗した結果の「0 件」を、正常な空一覧と取り違えさせないためです。
 
@@ -328,9 +378,10 @@ jobIDCache.Invalidate(prefix)
 
 | パッケージ | 用途 |
 | --- | --- |
-| [shouni/go-remote-io](https://github.com/shouni/go-remote-io) | 状態ファイルの読み書き（GCS / S3 / ローカルを透過的に扱う） |
+| [shouni/go-remote-io](https://github.com/shouni/go-remote-io) | 状態ファイルの読み書きと一覧走査（GCS / S3 / ローカルを透過的に扱う） |
 | [shouni/go-utils](https://github.com/shouni/go-utils) | ジョブ ID の検証・正規化 (`jobid`) |
 | [jellydator/ttlcache](https://github.com/jellydator/ttlcache) | TTL 付きインメモリキャッシュ |
+| [golang.org/x/sync](https://pkg.go.dev/golang.org/x/sync/singleflight) | 同時のキャッシュミスで一覧走査を 1 回にまとめる（`cache.IDList`） |
 
 `paging` は標準ライブラリのみに依存します。
 
