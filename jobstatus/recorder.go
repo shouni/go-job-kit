@@ -131,7 +131,9 @@ func (r *Recorder[T]) AlreadySucceeded(ctx context.Context, jobID string) (bool,
 //
 // apply は引き継ぎの後、保存の前に呼ばれます。試行回数の加算や、サービス固有
 // フィールドの引き継ぎに使ってください。prev は前回の記録で、読めなかったときは
-// nil です。
+// nil です。未記録（ErrNotFound）は初回の記録として黙って進み、それ以外の読み取り
+// 失敗は引き継ぎ元を失っている（Attempts・QueuedAt がこの記録でリセットされる）ため、
+// 警告ログを残します。
 //
 //	// 処理開始を記録し、試行回数を 1 つ進める
 //	rec.Record(ctx, task.JobID, newStatus(task, StateRunning), func(next, _ *JobStatus) {
@@ -152,6 +154,12 @@ func (r *Recorder[T]) Record(ctx context.Context, jobID string, status T, apply 
 				next.CarryOver(old.Common())
 			}
 		}
+	} else if !errors.Is(err, ErrNotFound) {
+		// 未記録は初回の記録なので正常。それ以外（読み取り失敗・壊れた JSON）は
+		// 引き継ぎが失われ、Attempts・QueuedAt がこの記録でリセットされるため、
+		// 静かに進めず原因を残す。記録そのものは行う（観測の欠けを理由に増やさない）。
+		r.logger.WarnContext(ctx, "failed to read previous job status; carry-over skipped",
+			"job_id", jobID, "error", err)
 	}
 
 	for _, fn := range apply {
