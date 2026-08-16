@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -178,6 +179,154 @@ func TestIDListConcurrentAccess(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// 同時のキャッシュミスでは走査を 1 回にまとめること。一覧走査はプレフィックス配下
+// 全体の List なので、TTL が切れた瞬間に重なったリクエストの数だけ走らせない。
+func TestIDListConcurrentMissRunsCollectOnce(t *testing.T) {
+	t.Parallel()
+
+	list := cache.NewIDList(time.Minute)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	collect := func(context.Context) ([]string, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+		}
+		<-release
+		return []string{"job-b", "job-a"}, nil
+	}
+
+	const waiters = 20
+	results := make([][]string, waiters)
+	errs := make([]error, waiters)
+	var wg sync.WaitGroup
+	for i := range waiters {
+		wg.Go(func() {
+			results[i], errs[i] = list.Load(context.Background(), testPrefix, collect)
+		})
+	}
+
+	<-entered // 走査が始まるのを待ってから、全員をまとめて解放する
+	close(release)
+	wg.Wait()
+
+	for i := range waiters {
+		if errs[i] != nil {
+			t.Fatalf("Load()[%d] error = %v", i, errs[i])
+		}
+		if !slices.Equal(results[i], []string{"job-b", "job-a"}) {
+			t.Fatalf("Load()[%d] = %v", i, results[i])
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("collect の呼び出し回数 = %d, want 1（同時ミスは 1 回の走査にまとめる）", got)
+	}
+}
+
+// 待っている呼び出しは自分の ctx にだけ従うこと。走査そのものは放棄せず、
+// 完了すればキャッシュを温める。
+func TestIDListWaiterHonorsOwnContext(t *testing.T) {
+	t.Parallel()
+
+	list := cache.NewIDList(time.Minute)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	collect := func(context.Context) ([]string, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+		}
+		<-release
+		return []string{"job-a"}, nil
+	}
+
+	// 走査を始める側は塞がったまま。
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		if _, err := list.Load(context.Background(), testPrefix, collect); err != nil {
+			t.Errorf("走査側の Load() error = %v", err)
+		}
+	}()
+	<-entered
+
+	// 待ち側は自分の ctx が終わった時点で抜ける（走査の完了を待たされない）。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := list.Load(ctx, testPrefix, collect); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Load() error = %v, want context.Canceled", err)
+	}
+
+	close(release)
+	<-leaderDone
+
+	// 抜けたあとも走査は完了しており、キャッシュから読めること。
+	got, err := list.Load(context.Background(), testPrefix, collect)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !slices.Equal(got, []string{"job-a"}) {
+		t.Errorf("Load() = %v", got)
+	}
+	if callCount := calls.Load(); callCount != 1 {
+		t.Errorf("collect の呼び出し回数 = %d, want 1（走査は放棄されない）", callCount)
+	}
+}
+
+// 走査を始めた呼び出しがキャンセルされても、待っていた呼び出しは巻き込まれず、
+// 自分の ctx で走査をやり直すこと。
+func TestIDListRetriesAfterLeaderCancel(t *testing.T) {
+	t.Parallel()
+
+	list := cache.NewIDList(time.Minute)
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	entered := make(chan struct{})
+	var calls atomic.Int32
+	collect := func(ctx context.Context) ([]string, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-ctx.Done() // 最初の走査はキャンセルされるまで塞がり、そのまま失敗する
+			return nil, ctx.Err()
+		}
+		return []string{"job-a"}, nil
+	}
+
+	leaderErr := make(chan error, 1)
+	go func() {
+		_, err := list.Load(leaderCtx, testPrefix, collect)
+		leaderErr <- err
+	}()
+	<-entered
+
+	waiterDone := make(chan struct{})
+	var waiterIDs []string
+	var waiterErr error
+	go func() {
+		defer close(waiterDone)
+		waiterIDs, waiterErr = list.Load(context.Background(), testPrefix, collect)
+	}()
+
+	// 待ち側が走査へ合流したかどうかは外から観測できないため、少し待ってから
+	// キャンセルする。合流前だった場合も、待ち側が自分で走査を始めるだけで、
+	// 検証する振る舞い（巻き込まれずに結果を得る・走査は計 2 回）は変わらない。
+	time.Sleep(20 * time.Millisecond)
+	cancelLeader()
+
+	<-waiterDone
+	if waiterErr != nil {
+		t.Fatalf("待ち側の Load() error = %v, want nil（他人のキャンセルに巻き込まれない）", waiterErr)
+	}
+	if !slices.Equal(waiterIDs, []string{"job-a"}) {
+		t.Errorf("待ち側の Load() = %v", waiterIDs)
+	}
+	if err := <-leaderErr; !errors.Is(err, context.Canceled) {
+		t.Errorf("走査側の Load() error = %v, want context.Canceled", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("collect の呼び出し回数 = %d, want 2（失敗した走査 + やり直し）", got)
+	}
 }
 
 // 既定の TTL が使われること（0 以下は DefaultIDListTTL へ丸める）。
