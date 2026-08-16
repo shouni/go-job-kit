@@ -305,6 +305,22 @@ func TestDeleteRemovesStatus(t *testing.T) {
 	}
 }
 
+// Delete の失敗も、どの URI で失敗したかが分かる形で返すこと（Save と同じ形式）。
+func TestDeleteWrapsError(t *testing.T) {
+	t.Parallel()
+
+	store := newMemStore()
+	store.deleteErr = errors.New("permission denied")
+
+	err := newStore(store).Delete(context.Background(), testJobID)
+	if !errors.Is(err, store.deleteErr) {
+		t.Fatalf("Delete() error = %v, want wrapping %v", err, store.deleteErr)
+	}
+	if !strings.Contains(err.Error(), testStatusPath) {
+		t.Errorf("エラーに URI が含まれていない: %v", err)
+	}
+}
+
 // Status を埋め込んでいない型は打刻されず、そのまま保存されること。
 func TestSaveWithoutEmbeddedStatus(t *testing.T) {
 	t.Parallel()
@@ -340,10 +356,12 @@ func TestUnderJobDirRejectsEmptyBase(t *testing.T) {
 // memStore は remoteio.Reader / remoteio.OutputWriter のインメモリ実装です。
 type memStore struct {
 	// openErr は未存在以外の読み取り失敗（権限不足・障害）を再現します。
-	openErr  error
-	mu       sync.Mutex
-	files    map[string][]byte
-	optCount map[string]int
+	openErr error
+	// deleteErr は削除の失敗を再現します。
+	deleteErr error
+	mu        sync.Mutex
+	files     map[string][]byte
+	optCount  map[string]int
 }
 
 func newMemStore() *memStore {
@@ -382,6 +400,10 @@ func (m *memStore) Write(_ context.Context, path string, r io.Reader, opts ...re
 func (m *memStore) Delete(_ context.Context, path string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
 	delete(m.files, path)
 	return nil
 }

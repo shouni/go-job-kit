@@ -1,11 +1,13 @@
 package jobstatus_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -186,6 +188,50 @@ func TestRecordSwallowsSaveFailure(t *testing.T) {
 	rec.Record(context.Background(), testJobID, appStatus{
 		Status: jobstatus.Status{JobID: testJobID, State: jobstatus.StateRunning},
 	})
+}
+
+// 前回の記録を読めなかったときは、引き継ぎが失われたことを警告ログに残すこと。
+// Attempts・QueuedAt がこの記録でリセットされるため、静かには進めない。
+// 記録そのものは行う（観測の欠けを理由に、失敗を増やさない）。
+func TestRecordWarnsWhenPreviousUnreadable(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore()
+	store.getErr = fmt.Errorf("%w: storage down", jobstatus.ErrUnavailable)
+
+	var buf bytes.Buffer
+	rec := jobstatus.NewRecorder(store,
+		jobstatus.WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
+	rec.Record(context.Background(), testJobID, appStatus{
+		Status: jobstatus.Status{JobID: testJobID, State: jobstatus.StateRunning},
+	})
+
+	// getErr は Save には影響しないため、記録は行われている。
+	if got := store.saved[testJobID].State; got != jobstatus.StateRunning {
+		t.Errorf("State = %q, want running（読めなくても記録は行う）", got)
+	}
+	if log := buf.String(); !strings.Contains(log, "carry-over skipped") || !strings.Contains(log, testJobID) {
+		t.Errorf("引き継ぎが失われた警告が無い: %q", log)
+	}
+}
+
+// 未記録（ErrNotFound）は初回の記録として正常なので、警告ログを出さないこと。
+func TestRecordStaysQuietWhenNotRecorded(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore()
+	store.getErr = fmt.Errorf("%w: 未記録", jobstatus.ErrNotFound)
+
+	var buf bytes.Buffer
+	rec := jobstatus.NewRecorder(store,
+		jobstatus.WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
+	rec.Record(context.Background(), testJobID, appStatus{
+		Status: jobstatus.Status{JobID: testJobID, State: jobstatus.StateQueued},
+	})
+
+	if got := buf.String(); got != "" {
+		t.Errorf("初回の記録なのにログが出ている: %q", got)
+	}
 }
 
 // 記録先が未設定でも呼び出せ、何も起きないこと。
