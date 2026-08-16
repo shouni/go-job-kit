@@ -75,6 +75,7 @@ func LoadPage[T any](
 	sem := make(chan struct{}, cfg.concurrency)
 	var wg sync.WaitGroup
 
+loop:
 	for i, jobID := range selectedIDs {
 		if ctx.Err() != nil {
 			break
@@ -82,7 +83,13 @@ func LoadPage[T any](
 
 		// 取得枠は goroutine の外で確保します。中で待たせると、同時に読むのは
 		// 上限どおりでも goroutine だけはページ全件分が一度に立ちます。
-		sem <- struct{}{}
+		// 枠待ちの間もキャンセルを見ます。見ないと、全ての枠が塞がっている間に
+		// キャンセルされても待ち続け、空いた枠でもう 1 件読み始めてしまいます。
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break loop
+		}
 		wg.Go(func() {
 			defer func() { <-sem }()
 
