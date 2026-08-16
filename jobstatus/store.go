@@ -80,11 +80,10 @@ type Store[T any] struct {
 // とおり引き続き許容します。そちらは打刻も引き継ぎも行われないだけで、誤って
 // 静かに壊れるわけではないためです。
 func mustNotBePointer[T any](fn string) {
-	var zero T
-	if reflect.TypeOf(&zero).Elem().Kind() == reflect.Pointer {
+	if t := reflect.TypeFor[T](); t.Kind() == reflect.Pointer {
 		panic(fmt.Sprintf(
-			"jobstatus: %s[%T]: 型引数にポインタ型を渡さないでください。"+
-				"打刻・引き継ぎ・再実行ガードが無効になります（値型で instantiate してください）", fn, zero))
+			"jobstatus: %s[%s]: 型引数にポインタ型を渡さないでください。"+
+				"打刻・引き継ぎ・再実行ガードが無効になります（値型で instantiate してください）", fn, t))
 	}
 }
 
@@ -188,7 +187,10 @@ func (s *Store[T]) Delete(ctx context.Context, jobID string) error {
 	if s.writer == nil {
 		return nil
 	}
-	return s.writer.Delete(ctx, uri)
+	if err := s.writer.Delete(ctx, uri); err != nil {
+		return fmt.Errorf("jobstatus: delete (%s): %w", uri, err)
+	}
+	return nil
 }
 
 // resolve はジョブ ID を正規化し、状態ファイルの URI を組み立てます。
