@@ -3,6 +3,7 @@ package cache_test
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/shouni/go-job-kit/cache"
@@ -67,15 +68,19 @@ func TestUnnormalizableKeyStillUsable(t *testing.T) {
 func TestExpiredEntryIsNotReturned(t *testing.T) {
 	t.Parallel()
 
-	c := cache.NewTTL[string](20 * time.Millisecond)
-	defer c.Close()
+	// バブル内の time.Sleep は仮想時間を進めるだけなので、保持期間の経過を
+	// 実時間を待たずに再現できます。
+	synctest.Test(t, func(t *testing.T) {
+		c := cache.NewTTL[string](20 * time.Millisecond)
+		defer c.Close()
 
-	c.Set("job-1", "value")
-	time.Sleep(60 * time.Millisecond)
+		c.Set("job-1", "value")
+		time.Sleep(60 * time.Millisecond)
 
-	if _, ok := c.Get("job-1"); ok {
-		t.Error("期限切れの値が返っている")
-	}
+		if _, ok := c.Get("job-1"); ok {
+			t.Error("期限切れの値が返っている")
+		}
+	})
 }
 
 // 期限切れエントリが回収されること。
@@ -83,19 +88,22 @@ func TestExpiredEntryIsNotReturned(t *testing.T) {
 func TestExpiredEntryIsEvicted(t *testing.T) {
 	t.Parallel()
 
-	c := cache.NewTTL[string](20 * time.Millisecond)
-	defer c.Close()
+	synctest.Test(t, func(t *testing.T) {
+		c := cache.NewTTL[string](20 * time.Millisecond)
+		defer c.Close()
 
-	c.Set("job-1", "value")
+		c.Set("job-1", "value")
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if c.Len() == 0 {
-			return
+		// 回収は NewTTL が起動したゴルーチンが行います。Sleep で保持期間を過ぎさせ、
+		// Wait でその回収が終わるまで待ちます。「いつかは回収されるはず」と
+		// 期限を切ってポーリングする必要はありません。
+		time.Sleep(30 * time.Millisecond)
+		synctest.Wait()
+
+		if got := c.Len(); got != 0 {
+			t.Errorf("Len() = %d, want 0（期限切れエントリが回収されていない）", got)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Errorf("Len() = %d, want 0（期限切れエントリが回収されていない）", c.Len())
+	})
 }
 
 func TestNonPositiveTTLFallsBackToDefault(t *testing.T) {

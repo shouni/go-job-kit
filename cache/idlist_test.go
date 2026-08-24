@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/shouni/go-job-kit/cache"
@@ -114,24 +115,26 @@ func TestIDListDoesNotCacheFailure(t *testing.T) {
 func TestIDListExpires(t *testing.T) {
 	t.Parallel()
 
-	list := cache.NewIDList(30 * time.Millisecond)
-	var calls int
-	collect := func(context.Context) ([]string, error) {
-		calls++
-		return []string{"job-a"}, nil
-	}
+	synctest.Test(t, func(t *testing.T) {
+		list := cache.NewIDList(30 * time.Millisecond)
+		var calls int
+		collect := func(context.Context) ([]string, error) {
+			calls++
+			return []string{"job-a"}, nil
+		}
 
-	if _, err := list.Load(context.Background(), testPrefix, collect); err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	time.Sleep(60 * time.Millisecond)
-	if _, err := list.Load(context.Background(), testPrefix, collect); err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
+		if _, err := list.Load(context.Background(), testPrefix, collect); err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		time.Sleep(60 * time.Millisecond)
+		if _, err := list.Load(context.Background(), testPrefix, collect); err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
 
-	if calls != 2 {
-		t.Errorf("collect の呼び出し回数 = %d, want 2（期限切れ後は再走査）", calls)
-	}
+		if calls != 2 {
+			t.Errorf("collect の呼び出し回数 = %d, want 2（期限切れ後は再走査）", calls)
+		}
+	})
 }
 
 // キャッシュを任意機能として組み込めること（nil でも走査は成立する）。
@@ -186,43 +189,48 @@ func TestIDListConcurrentAccess(t *testing.T) {
 func TestIDListConcurrentMissRunsCollectOnce(t *testing.T) {
 	t.Parallel()
 
-	list := cache.NewIDList(time.Minute)
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var calls atomic.Int32
-	collect := func(context.Context) ([]string, error) {
-		if calls.Add(1) == 1 {
-			close(entered)
+	synctest.Test(t, func(t *testing.T) {
+		list := cache.NewIDList(time.Minute)
+		release := make(chan struct{})
+		var calls atomic.Int32
+		collect := func(context.Context) ([]string, error) {
+			calls.Add(1)
+			<-release
+			return []string{"job-b", "job-a"}, nil
 		}
-		<-release
-		return []string{"job-b", "job-a"}, nil
-	}
 
-	const waiters = 20
-	results := make([][]string, waiters)
-	errs := make([]error, waiters)
-	var wg sync.WaitGroup
-	for i := range waiters {
-		wg.Go(func() {
-			results[i], errs[i] = list.Load(context.Background(), testPrefix, collect)
-		})
-	}
-
-	<-entered // 走査が始まるのを待ってから、全員をまとめて解放する
-	close(release)
-	wg.Wait()
-
-	for i := range waiters {
-		if errs[i] != nil {
-			t.Fatalf("Load()[%d] error = %v", i, errs[i])
+		const waiters = 20
+		results := make([][]string, waiters)
+		errs := make([]error, waiters)
+		var wg sync.WaitGroup
+		for i := range waiters {
+			wg.Go(func() {
+				results[i], errs[i] = list.Load(context.Background(), testPrefix, collect)
+			})
 		}
-		if !slices.Equal(results[i], []string{"job-b", "job-a"}) {
-			t.Fatalf("Load()[%d] = %v", i, results[i])
+
+		// 全員が走査に合流するのを待ってから、まとめて解放する。
+		//
+		// 「走査が始まった」だけを待って解放すると、まだ Load へ入っていない呼び出しが
+		// 残っていることがあり、その分が 2 回目の走査を始めてしまう（実際に稀に落ちていた）。
+		// Wait はバブル内の他のゴルーチンがすべて継続的にブロックした時点で返るので、
+		// 「全員が合流済み」を待ち時間の見積もりなしに保証できる。
+		synctest.Wait()
+		close(release)
+		wg.Wait()
+
+		for i := range waiters {
+			if errs[i] != nil {
+				t.Fatalf("Load()[%d] error = %v", i, errs[i])
+			}
+			if !slices.Equal(results[i], []string{"job-b", "job-a"}) {
+				t.Fatalf("Load()[%d] = %v", i, results[i])
+			}
 		}
-	}
-	if got := calls.Load(); got != 1 {
-		t.Errorf("collect の呼び出し回数 = %d, want 1（同時ミスは 1 回の走査にまとめる）", got)
-	}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("collect の呼び出し回数 = %d, want 1（同時ミスは 1 回の走査にまとめる）", got)
+		}
+	})
 }
 
 // 待っている呼び出しは自分の ctx にだけ従うこと。走査そのものは放棄せず、
@@ -280,53 +288,55 @@ func TestIDListWaiterHonorsOwnContext(t *testing.T) {
 func TestIDListRetriesAfterLeaderCancel(t *testing.T) {
 	t.Parallel()
 
-	list := cache.NewIDList(time.Minute)
-	leaderCtx, cancelLeader := context.WithCancel(context.Background())
-	entered := make(chan struct{})
-	var calls atomic.Int32
-	collect := func(ctx context.Context) ([]string, error) {
-		if calls.Add(1) == 1 {
-			close(entered)
-			<-ctx.Done() // 最初の走査はキャンセルされるまで塞がり、そのまま失敗する
-			return nil, ctx.Err()
+	synctest.Test(t, func(t *testing.T) {
+		list := cache.NewIDList(time.Minute)
+		leaderCtx, cancelLeader := context.WithCancel(context.Background())
+		entered := make(chan struct{})
+		var calls atomic.Int32
+		collect := func(ctx context.Context) ([]string, error) {
+			if calls.Add(1) == 1 {
+				close(entered)
+				<-ctx.Done() // 最初の走査はキャンセルされるまで塞がり、そのまま失敗する
+				return nil, ctx.Err()
+			}
+			return []string{"job-a"}, nil
 		}
-		return []string{"job-a"}, nil
-	}
 
-	leaderErr := make(chan error, 1)
-	go func() {
-		_, err := list.Load(leaderCtx, testPrefix, collect)
-		leaderErr <- err
-	}()
-	<-entered
+		leaderErr := make(chan error, 1)
+		go func() {
+			_, err := list.Load(leaderCtx, testPrefix, collect)
+			leaderErr <- err
+		}()
+		<-entered
 
-	waiterDone := make(chan struct{})
-	var waiterIDs []string
-	var waiterErr error
-	go func() {
-		defer close(waiterDone)
-		waiterIDs, waiterErr = list.Load(context.Background(), testPrefix, collect)
-	}()
+		waiterDone := make(chan struct{})
+		var waiterIDs []string
+		var waiterErr error
+		go func() {
+			defer close(waiterDone)
+			waiterIDs, waiterErr = list.Load(context.Background(), testPrefix, collect)
+		}()
 
-	// 待ち側が走査へ合流したかどうかは外から観測できないため、少し待ってから
-	// キャンセルする。合流前だった場合も、待ち側が自分で走査を始めるだけで、
-	// 検証する振る舞い（巻き込まれずに結果を得る・走査は計 2 回）は変わらない。
-	time.Sleep(20 * time.Millisecond)
-	cancelLeader()
+		// 待ち側が走査へ合流するまで待ってからキャンセルする。Wait はバブル内の
+		// 他のゴルーチンがすべて継続的にブロックした時点で返るので、「合流したはず」を
+		// 待ち時間で見積もらずに済み、合流前にキャンセルする取りこぼしも起きない。
+		synctest.Wait()
+		cancelLeader()
 
-	<-waiterDone
-	if waiterErr != nil {
-		t.Fatalf("待ち側の Load() error = %v, want nil（他人のキャンセルに巻き込まれない）", waiterErr)
-	}
-	if !slices.Equal(waiterIDs, []string{"job-a"}) {
-		t.Errorf("待ち側の Load() = %v", waiterIDs)
-	}
-	if err := <-leaderErr; !errors.Is(err, context.Canceled) {
-		t.Errorf("走査側の Load() error = %v, want context.Canceled", err)
-	}
-	if got := calls.Load(); got != 2 {
-		t.Errorf("collect の呼び出し回数 = %d, want 2（失敗した走査 + やり直し）", got)
-	}
+		<-waiterDone
+		if waiterErr != nil {
+			t.Fatalf("待ち側の Load() error = %v, want nil（他人のキャンセルに巻き込まれない）", waiterErr)
+		}
+		if !slices.Equal(waiterIDs, []string{"job-a"}) {
+			t.Errorf("待ち側の Load() = %v", waiterIDs)
+		}
+		if err := <-leaderErr; !errors.Is(err, context.Canceled) {
+			t.Errorf("走査側の Load() error = %v, want context.Canceled", err)
+		}
+		if got := calls.Load(); got != 2 {
+			t.Errorf("collect の呼び出し回数 = %d, want 2（失敗した走査 + やり直し）", got)
+		}
+	})
 }
 
 // 既定の TTL が使われること（0 以下は DefaultIDListTTL へ丸める）。

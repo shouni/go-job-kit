@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	"github.com/shouni/go-job-kit/paging"
 )
@@ -168,41 +168,44 @@ func TestLoadPageLimitsConcurrency(t *testing.T) {
 func TestLoadPageStopsAcquiringAfterCancel(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	started := make(chan struct{})
-	release := make(chan struct{})
-	var calls atomic.Int32
-	// ctx を無視して塞がる読み込み。1 件目が枠を占有し続ける。
-	load := func(context.Context, string) (string, error) {
-		if calls.Add(1) == 1 {
-			close(started)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		started := make(chan struct{})
+		release := make(chan struct{})
+		var calls atomic.Int32
+		// ctx を無視して塞がる読み込み。1 件目が枠を占有し続ける。
+		load := func(context.Context, string) (string, error) {
+			if calls.Add(1) == 1 {
+				close(started)
+			}
+			<-release
+			return "", errors.New("gave up")
 		}
-		<-release
-		return "", errors.New("gave up")
-	}
 
-	done := make(chan struct{})
-	var err error
-	go func() {
-		defer close(done)
-		_, _, err = paging.LoadPage(ctx, []string{"job-01", "job-02"}, 1, 10, load,
-			paging.WithConcurrency(1), discardLogger())
-	}()
+		done := make(chan struct{})
+		var err error
+		go func() {
+			defer close(done)
+			_, _, err = paging.LoadPage(ctx, []string{"job-01", "job-02"}, 1, 10, load,
+				paging.WithConcurrency(1), discardLogger())
+		}()
 
-	<-started // 1 件目が枠を取ってから
-	cancel()
-	// キャンセル後、枠待ちの唯一の出口は ctx.Done なので、release の前に
-	// 2 件目の取得待ちは抜けている。ここで枠を空けても 2 件目は始まらないこと。
-	time.Sleep(50 * time.Millisecond)
-	close(release)
-	<-done
+		<-started // 1 件目が枠を取ってから
+		cancel()
+		// キャンセル後、枠待ちの唯一の出口は ctx.Done なので、release の前に
+		// 2 件目の取得待ちは抜けている。Wait でその抜けきりを待ってから枠を空け、
+		// 2 件目が始まらないことを確かめる（待ち時間の見積もりに頼らない）。
+		synctest.Wait()
+		close(release)
+		<-done
 
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("LoadPage() error = %v, want context.Canceled", err)
-	}
-	if got := calls.Load(); got != 1 {
-		t.Errorf("load の呼び出し回数 = %d, want 1（キャンセル後に次を読み始めない）", got)
-	}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("LoadPage() error = %v, want context.Canceled", err)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("load の呼び出し回数 = %d, want 1（キャンセル後に次を読み始めない）", got)
+		}
+	})
 }
 
 // perPage が 0 以下ならページングせず全件を読み込むこと（SelectIDs と同じ）。
