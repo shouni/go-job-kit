@@ -60,18 +60,16 @@ func TestRecordCarriesOverAttemptsAndQueuedAt(t *testing.T) {
 	queuedAt := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
 	store := newFakeStore()
 	store.saved[testJobID] = appStatus{
-		Status: jobstatus.Status{
-			JobID:    testJobID,
-			State:    jobstatus.StateRunning,
-			Title:    "先に判明した題目",
-			Attempts: 2,
-			QueuedAt: queuedAt,
-		},
+		JobID:    testJobID,
+		State:    jobstatus.StateRunning,
+		Title:    "先に判明した題目",
+		Attempts: 2,
+		QueuedAt: queuedAt,
 	}
 
 	rec := jobstatus.NewRecorder(store)
 	rec.Record(context.Background(), testJobID, appStatus{
-		Status: jobstatus.Status{JobID: testJobID, State: jobstatus.StateFailed, Error: "boom"},
+		JobID: testJobID, State: jobstatus.StateFailed, Error: "boom",
 	}, func(next, _ *appStatus) {
 		next.Attempts++
 	})
@@ -98,12 +96,12 @@ func TestRecordKeepsNewerTitle(t *testing.T) {
 
 	store := newFakeStore()
 	store.saved[testJobID] = appStatus{
-		Status: jobstatus.Status{JobID: testJobID, Title: "古い題目"},
+		JobID: testJobID, Title: "古い題目",
 	}
 
 	rec := jobstatus.NewRecorder(store)
 	rec.Record(context.Background(), testJobID, appStatus{
-		Status: jobstatus.Status{JobID: testJobID, State: jobstatus.StateSucceeded, Title: "確定した題目"},
+		JobID: testJobID, State: jobstatus.StateSucceeded, Title: "確定した題目",
 	})
 
 	if got := store.saved[testJobID].Title; got != "確定した題目" {
@@ -117,12 +115,12 @@ func TestRecordDoesNotCarryOverError(t *testing.T) {
 
 	store := newFakeStore()
 	store.saved[testJobID] = appStatus{
-		Status: jobstatus.Status{JobID: testJobID, State: jobstatus.StateFailed, Error: "前回の失敗"},
+		JobID: testJobID, State: jobstatus.StateFailed, Error: "前回の失敗",
 	}
 
 	rec := jobstatus.NewRecorder(store)
 	rec.Record(context.Background(), testJobID, appStatus{
-		Status: jobstatus.Status{JobID: testJobID, State: jobstatus.StateSucceeded},
+		JobID: testJobID, State: jobstatus.StateSucceeded,
 	})
 
 	if got := store.saved[testJobID].Error; got != "" {
@@ -136,13 +134,13 @@ func TestRecordExposesPreviousToApply(t *testing.T) {
 
 	store := newFakeStore()
 	store.saved[testJobID] = appStatus{
-		Status:    jobstatus.Status{JobID: testJobID},
+		JobID:     testJobID,
 		OutputDir: "gs://bucket/jobs/" + testJobID,
 	}
 
 	rec := jobstatus.NewRecorder(store)
 	rec.Record(context.Background(), testJobID, appStatus{
-		Status: jobstatus.Status{JobID: testJobID, State: jobstatus.StateRunning},
+		JobID: testJobID, State: jobstatus.StateRunning,
 	}, func(next, prev *appStatus) {
 		if prev != nil {
 			next.OutputDir = prev.OutputDir
@@ -163,7 +161,7 @@ func TestRecordWithoutPreviousRecord(t *testing.T) {
 
 	var sawPrev bool
 	rec.Record(context.Background(), testJobID, appStatus{
-		Status: jobstatus.Status{JobID: testJobID, State: jobstatus.StateQueued},
+		JobID: testJobID, State: jobstatus.StateQueued,
 	}, func(_, prev *appStatus) {
 		sawPrev = prev != nil
 	})
@@ -186,7 +184,7 @@ func TestRecordSwallowsSaveFailure(t *testing.T) {
 	rec := jobstatus.NewRecorder(store,
 		jobstatus.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
 	rec.Record(context.Background(), testJobID, appStatus{
-		Status: jobstatus.Status{JobID: testJobID, State: jobstatus.StateRunning},
+		JobID: testJobID, State: jobstatus.StateRunning,
 	})
 }
 
@@ -203,7 +201,7 @@ func TestRecordWarnsWhenPreviousUnreadable(t *testing.T) {
 	rec := jobstatus.NewRecorder(store,
 		jobstatus.WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
 	rec.Record(context.Background(), testJobID, appStatus{
-		Status: jobstatus.Status{JobID: testJobID, State: jobstatus.StateRunning},
+		JobID: testJobID, State: jobstatus.StateRunning,
 	})
 
 	// getErr は Save には影響しないため、記録は行われている。
@@ -226,7 +224,7 @@ func TestRecordStaysQuietWhenNotRecorded(t *testing.T) {
 	rec := jobstatus.NewRecorder(store,
 		jobstatus.WithLogger(slog.New(slog.NewTextHandler(&buf, nil))))
 	rec.Record(context.Background(), testJobID, appStatus{
-		Status: jobstatus.Status{JobID: testJobID, State: jobstatus.StateQueued},
+		JobID: testJobID, State: jobstatus.StateQueued,
 	})
 
 	if got := buf.String(); got != "" {
@@ -271,7 +269,7 @@ func TestAlreadySucceeded(t *testing.T) {
 			t.Parallel()
 
 			store := newFakeStore()
-			store.saved[testJobID] = appStatus{Status: jobstatus.Status{State: tt.state}}
+			store.saved[testJobID] = appStatus{State: tt.state}
 
 			rec := jobstatus.NewRecorder(store)
 			got, err := rec.AlreadySucceeded(context.Background(), testJobID)

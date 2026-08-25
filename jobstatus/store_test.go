@@ -40,7 +40,7 @@ func TestSaveWritesInsideJobDirectory(t *testing.T) {
 
 	store := newMemStore()
 	err := newStore(store).Save(context.Background(), testJobID, appStatus{
-		Status: jobstatus.Status{Command: "generate", State: jobstatus.StateQueued},
+		Command: "generate", State: jobstatus.StateQueued,
 	})
 	if err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -56,12 +56,10 @@ func TestSaveAndGetRoundTrip(t *testing.T) {
 
 	store := newStore(newMemStore())
 	original := appStatus{
-		Status: jobstatus.Status{
-			Command:  "generate",
-			State:    jobstatus.StateSucceeded,
-			Title:    "テスト作品",
-			Attempts: 3,
-		},
+		Command:   "generate",
+		State:     jobstatus.StateSucceeded,
+		Title:     "テスト作品",
+		Attempts:  3,
 		OutputDir: testBaseURI + "/" + testJobID,
 	}
 	if err := store.Save(context.Background(), testJobID, original); err != nil {
@@ -100,7 +98,7 @@ func TestStoredJSONStaysFlat(t *testing.T) {
 
 	store := newMemStore()
 	err := newStore(store).Save(context.Background(), testJobID, appStatus{
-		Status:    jobstatus.Status{Command: "generate", State: jobstatus.StateRunning},
+		Command: "generate", State: jobstatus.StateRunning,
 		OutputDir: "gs://bucket/jobs/x",
 	})
 	if err != nil {
@@ -193,7 +191,7 @@ func TestSaveNormalizesPathTraversalJobID(t *testing.T) {
 
 	// "../../etc/passwd" は末尾要素 "passwd" へ正規化され、baseURI 配下に収まる。
 	err := newStore(store).Save(context.Background(), "../../etc/passwd", appStatus{
-		Status: jobstatus.Status{State: jobstatus.StateQueued},
+		State: jobstatus.StateQueued,
 	})
 	if err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -213,7 +211,7 @@ func TestSaveRejectsInvalidJobID(t *testing.T) {
 	store := newMemStore()
 
 	err := newStore(store).Save(context.Background(), "日本語", appStatus{
-		Status: jobstatus.Status{State: jobstatus.StateQueued},
+		State: jobstatus.StateQueued,
 	})
 	if err == nil {
 		t.Fatal("Save() error = nil, want an error")
@@ -232,7 +230,7 @@ func TestSaveOverwritesPreviousStatus(t *testing.T) {
 	ctx := context.Background()
 
 	for _, state := range []jobstatus.State{jobstatus.StateQueued, jobstatus.StateRunning, jobstatus.StateSucceeded} {
-		if err := s.Save(ctx, testJobID, appStatus{Status: jobstatus.Status{State: state}}); err != nil {
+		if err := s.Save(ctx, testJobID, appStatus{State: state}); err != nil {
 			t.Fatalf("Save(%q) error = %v", state, err)
 		}
 	}
@@ -255,7 +253,7 @@ func TestSaveOverwritesPreviousStatus(t *testing.T) {
 func TestSaveDoesNotMutateArgument(t *testing.T) {
 	t.Parallel()
 
-	status := appStatus{Status: jobstatus.Status{State: jobstatus.StateQueued}}
+	status := appStatus{State: jobstatus.StateQueued}
 
 	if err := newStore(newMemStore()).Save(context.Background(), testJobID, status); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -273,7 +271,7 @@ func TestSavePassesWriteOptions(t *testing.T) {
 
 	store := newMemStore()
 	err := newStore(store).Save(context.Background(), testJobID, appStatus{
-		Status: jobstatus.Status{State: jobstatus.StateQueued},
+		State: jobstatus.StateQueued,
 	})
 	if err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -293,7 +291,7 @@ func TestDeleteRemovesStatus(t *testing.T) {
 	s := newStore(store)
 	ctx := context.Background()
 
-	if err := s.Save(ctx, testJobID, appStatus{Status: jobstatus.Status{State: jobstatus.StateFailed}}); err != nil {
+	if err := s.Save(ctx, testJobID, appStatus{State: jobstatus.StateFailed}); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 	if err := s.Delete(ctx, testJobID); err != nil {
