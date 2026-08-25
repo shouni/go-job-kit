@@ -11,10 +11,10 @@ and was rebuilt under the new name with fresh git history, so `ap-comic` commit 
 only in the retired GitHub repository, not in any local checkout.)
 
 **Every exported entry point has real callers** — the original three apps use all of
-`jobstatus.Store`, `jobstatus.Recorder`, `paging.SelectIDs`, `paging.LoadPage`, `cache.TTL`,
-`cache.IDList`; `ap-voice` uses the `jobstatus` and `paging` halves. Nothing here is
-speculative, which is worth keeping true: an API with no caller cannot tell you whether its
-shape is right.
+`jobstatus.Store`, `jobstatus.Recorder`, `joblist.Collect`, `paging.SelectIDs`,
+`paging.LoadPage`, `cache.TTL`, `cache.IDList`; `ap-voice` uses the `jobstatus` and `paging`
+halves. Nothing here is speculative, which is worth keeping true: an API with no caller cannot
+tell you whether its shape is right.
 
 `joblist` (added after v1.0.5, shipped in the v1.1.x line) was the newest extraction:
 `ap-comp` (`repository/history_query.go`), `ap-mv` and `ap-story`
@@ -25,11 +25,12 @@ call `joblist.Collect`. `ap-voice` is the deliberate exception: its listing walk
 *without* a delimiter because one pass also derives per-job `HasAudio`, so it has no scanner
 to replace.
 
-**The API is load-bearing.** A breaking change here means a migration in four services,
-so add to the surface rather than reshaping it, and tag a new minor when you do. Two constraints
-in particular cannot be relaxed without touching stored data: `jobstatus.Status` is embedded by
-the consumers so its JSON stays flat (see below), and `paging.PageMeta`'s tags are what their
-HTTP responses already return.
+**The API is load-bearing.** A breaking change here means a migration in four services, so
+prefer adding to the surface over reshaping it; reshape only when the current shape is what
+makes callers get it wrong (`paging`'s sort key is the one case so far), and land the apps in
+the same round. Two constraints cannot be relaxed at all without touching stored data:
+`jobstatus.Status` is embedded by the consumers so its JSON stays flat (see below), and
+`paging.PageMeta`'s tags are what their HTTP responses already return.
 
 ## Commands
 
@@ -127,17 +128,14 @@ cache, concurrent page load — has all moved here (`jobstatus.Recorder`, `cache
 Packages sit at the repository root (`jobstatus/`, `joblist/`, `paging/`, `cache/`) — no
 `pkg/` prefix. `joblist` collects the IDs, `paging` orders and slices them, `cache` keeps both
 the scan result (`IDList`) and per-job metadata (`TTL`) warm; `paging` alone stays
-stdlib-only (README states it), which is why the storage-touching scanner is its own package
-rather than a `paging` helper.
+stdlib-only, which is why the storage-touching scanner is its own package rather than a
+`paging` helper.
 
 Design constraints that are not visible from any single file:
 
 - **Job IDs are a security boundary.** They land in both URL paths and storage paths. Normalization
   via `go-utils/jobid` belongs inside this library — at storage-path construction and at cache-key
   construction — so callers cannot forget it.
-- **`paging` makes the caller name its sort key.** Descending order of that key is what "newest
-  first" means here. There is no default, because the plausible default (the job ID itself) is
-  wrong for every consuming app and fails silently when it is wrong.
 - **Existing `status.json` objects in GCS must stay readable.** The apps' current structs serialize
   flat: `job_id`, `command`, `state`, `title`, `error`, `attempts`, `queued_at`, `updated_at`, plus
   app-specific fields (`storage_uri` / `recipe_storage_uri` in ap-comp, `output_dir` in ap-story).
@@ -156,21 +154,17 @@ Design constraints that are not visible from any single file:
   `ErrInvalidJobID`, covers an ID that fails normalization — a caller-input problem (400), not a
   storage one; without it, handlers answer a malformed URL with a 5xx and invite a retry that
   cannot succeed.
-- **A finished job must not be rolled back by a record — except by `queued`.** `Recorder.Record`
-  drops a `running` / `failed` write over a `succeeded` record, because a redelivered task
-  rebuilds its status from scratch and would otherwise make a finished job look unfinished to
-  both the polling UI and the re-run guard. `queued` is exempt and the exemption is load-bearing:
-  same-ID resubmission is a normal flow (`ap-comp` accepts a caller-supplied `job_id`; `ap-voice`
-  re-submits from the history detail page with the same ID), and those paths always write
-  `queued` before enqueueing. Blocking it would leave the record at `succeeded`, so
-  `AlreadySucceeded` would read the regeneration as already done and ACK the task without ever
-  running it — the guard causing the very skip it exists to prevent.
-- **`status.json` is read with `encoding/json/v2` (`UnmarshalRead`), not `json.Decoder`.**
-  The v1 decoder ignores bytes after the JSON value and takes the last of duplicate keys, so a
-  truncated write followed by a second write — `{"state":"succeeded",…,"state":"running"}` —
-  decoded cleanly as `running`. That is the same rollback the guard above prevents, arriving
-  through the read path instead. Writing is v2 for symmetry, which also stops `&`/`<`/`>` from
-  being escaped to `\u00XX`; v1-written files still read fine.
+- **`Recorder.Record` refuses to roll a finished job back, and `queued` is exempt.** The rule
+  itself is in `rolledBack`; what is invisible from here is why the exemption has to exist.
+  Same-ID resubmission is a normal flow in the apps — `ap-comp` accepts a caller-supplied
+  `job_id`, `ap-voice` re-submits from the history detail page with the same ID — and every
+  submission path writes `queued` before enqueueing. Blocking that write would leave the record
+  at `succeeded`, so the re-run guard would read the regeneration as already done and ACK the
+  task without ever running it.
+- **`status.json` goes through `encoding/json/v2`, not `json.Decoder`.** The reason is the
+  bullet above, reached from the read side: the v1 decoder took the last of duplicate keys, so a
+  half-written record followed by a second write decoded as the *newer* state and rolled a
+  finished job back. `Store.Get` carries the details.
 - **No app domain types.** Music, video, and comic result types stay in their own repositories.
   This library handles state and IDs. Auth, HTTP, and notification concerns belong to `gcp-kit`,
   `go-http-kit`, and `go-notify` respectively.

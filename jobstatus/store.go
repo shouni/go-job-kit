@@ -15,33 +15,41 @@ import (
 	"github.com/shouni/go-utils/jobid"
 )
 
-// ErrNotFound は、ジョブ状態がまだ記録されていないことを表します。
+// Store が返す 3 つの分類です。いずれも原因を包んだまま返すので、errors.Is の
+// 判定はそのままに、ログには元の失敗理由が残ります。
 //
-// 「状態が無い」は正常な状態（記録前の投入や、この機能より前に作られたジョブ）なので、
-// 呼び出し側がストレージ障害と区別できるよう独立したエラーにしています。
-// HTTP ハンドラーはこれを 404 に、それ以外を 500 にマップしてください。
-var ErrNotFound = errors.New("job status not found")
+// HTTP ハンドラーは次のようにマップしてください。分類ごとに呼び出し側が取るべき
+// 判断が違うため、まとめると必ずどちらかを取り違えます。
+//
+//	ErrInvalidJobID → 400  入力が不正。再試行しても直らない
+//	ErrNotFound     → 404  未記録。処理を先へ進めてよい
+//	ErrUnavailable  → 503  読めなかっただけ。あとで読めるかもしれない
+//	その他          → 500  壊れた JSON など
+var (
+	// ErrNotFound は、ジョブ状態がまだ記録されていないことを表します。
+	// 記録前の投入や、この機能より前に作られたジョブでも起こる正常な状態です。
+	ErrNotFound = errors.New("job status not found")
 
-// ErrUnavailable は、ジョブ状態が「存在するはずなのに読めなかった」ことを表します。
-//
-// ErrNotFound と分けているのは、両者で取るべき判断が正反対だからです。記録が無いなら
-// 処理を進めてよい一方、読めなかっただけの場合に「無い」とみなすと、完了済みのジョブを
-// 未完了と誤認して生成をまるごとやり直します（Recorder.AlreadySucceeded を参照）。
-//
-// 切り分けは remoteio が返す os.ErrNotExist で行います。追加のストレージ往復は不要です。
-// HTTP ハンドラーは ErrNotFound を 404 に、これを 503（または 500）にマップしてください。
-var ErrUnavailable = errors.New("job status unavailable")
+	// ErrUnavailable は、ジョブ状態が「存在するはずなのに読めなかった」ことを
+	// 表します。
+	//
+	// ErrNotFound と分けているのは、両者で取るべき判断が正反対だからです。記録が
+	// 無いなら処理を進めてよい一方、読めなかっただけの場合に「無い」とみなすと、
+	// 完了済みのジョブを未完了と誤認して生成をまるごとやり直します
+	// （Recorder.AlreadySucceeded を参照）。
+	//
+	// 切り分けは remoteio が返す os.ErrNotExist で行うため、追加のストレージ
+	// 往復は要りません。
+	ErrUnavailable = errors.New("job status unavailable")
 
-// ErrInvalidJobID は、渡されたジョブ ID が正規化を通らなかったことを表します。
-//
-// 「無い（404）」「読めない（503）」と並ぶ 3 つ目の分類で、こちらは呼び出し側の
-// 入力の問題（400）です。これが独立していないと、ハンドラーは URL に紛れ込んだ
-// 不正な ID をストレージ障害と同じ 5xx で返すことになり、再試行しても直らない
-// リクエストを再試行させます。
-//
-// 原因は jobid のエラーとして包んだまま残すので、errors.Is で jobid.ErrEmpty /
-// jobid.ErrTooLong / jobid.ErrInvalidFormat まで辿れます。
-var ErrInvalidJobID = errors.New("invalid job id")
+	// ErrInvalidJobID は、渡されたジョブ ID が正規化を通らなかったことを表します。
+	//
+	// これが独立していないと、ハンドラーは URL に紛れ込んだ不正な ID をストレージ
+	// 障害と同じ 5xx で返すことになり、再試行しても直らないリクエストを再試行
+	// させます。原因は jobid のエラーとして残るので、errors.Is で jobid.ErrEmpty /
+	// jobid.ErrTooLong / jobid.ErrInvalidFormat まで辿れます。
+	ErrInvalidJobID = errors.New("invalid job id")
+)
 
 // contentType はジョブ状態 JSON の Content-Type です。
 const contentType = "application/json; charset=utf-8"

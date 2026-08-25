@@ -39,10 +39,8 @@ type Carrier interface {
 // 3 は、状態はあくまで観測のための記録であり、書けなかったことを理由に生成を
 // 中断するほうが害が大きいためです。
 //
-// ワーカーの入口では 1 と 2 が必ず並んで呼ばれ、同じ status.json を 2 度読むことに
-// なります。その組み合わせは Begin にまとめてあるので、新しい呼び出しはそちらを
-// 使ってください。AlreadySucceeded は、記録を伴わない打ち切り判定のために残して
-// あります。
+// ワーカーの入口では 1 と 2 が必ず並んで呼ばれるため、その組み合わせは Begin に
+// まとめてあります。
 type Recorder[T any] struct {
 	store  StatusStore[T]
 	logger *slog.Logger
@@ -140,18 +138,19 @@ func (r *Recorder[T]) AlreadySucceeded(ctx context.Context, jobID string) (bool,
 // 失敗は引き継ぎ元を失っている（Attempts・QueuedAt がこの記録でリセットされる）ため、
 // 警告ログを残します。
 //
-//	// 処理開始を記録し、試行回数を 1 つ進める
-//	rec.Record(ctx, task.JobID, newStatus(task, StateRunning), func(next, _ *JobStatus) {
-//	    next.Attempts++
+//	// 投入を記録し、前回の成果物の在り処を残す
+//	rec.Record(ctx, req.JobID, newStatus(req, StateQueued), func(next, prev *JobStatus) {
+//	    if prev != nil {
+//	        next.OutputDir = prev.OutputDir
+//	    }
 //	})
 //
-// 前回が終了済み（IsTerminal）で今回が running・failed の場合は保存しません。
-// Cloud Tasks の再配信で完了済みのジョブが巻き戻ると、ポーリング中の画面も
-// 再実行ガードも「まだ終わっていない」と読むためです。**queued は例外で、
-// そのまま保存します。** 再配信されたタスクが書くのは running か failed であり、
-// queued を書くのは新しい依頼だけなので、同じジョブ ID での作り直しをここで
-// 止めてしまわないためです。判定に使う前回の記録は引き継ぎのために既に
-// 読んでいるので、ストレージへの往復は増えません。
+// 前回が終了済み（IsTerminal）のとき、今回が running・failed なら保存しません
+// （queued は例外です。理由は rolledBack を参照）。判定に使う前回の記録は引き継ぎの
+// ために既に読んでいるので、ストレージへの往復は増えません。
+//
+// 処理開始（running）の記録は Begin を使ってください。再実行ガードと同じ読み取りに
+// 相乗りできます。
 //
 // 保存に失敗しても呼び出し側へは伝えず、警告ログに留めます。
 func (r *Recorder[T]) Record(ctx context.Context, jobID string, status T, apply ...func(next, prev *T)) {
@@ -175,10 +174,11 @@ func (r *Recorder[T]) Record(ctx context.Context, jobID string, status T, apply 
 // Begin は、再実行ガードと処理開始の記録を 1 回の読み取りで行います。
 // 完了済みで何もしなかった場合に true を返します。
 //
-// ワーカーの入口は AlreadySucceeded で打ち切りを判定してから Record で running を
-// 書く、という 2 段でした。Record は引き継ぎのために前回の記録を読み直すので、
-// 同じ status.json を 1 回のタスクで 2 度取得していたことになります。判定に必要な
-// 情報は引き継ぎ元とまったく同じなので、ここでまとめます。
+// AlreadySucceeded で打ち切りを判定してから Record で running を書くと、Record が
+// 引き継ぎのために前回の記録を読み直すため、同じ status.json を 1 タスクで 2 度
+// 取得することになります。判定に要る情報は引き継ぎ元とまったく同じなので、
+// ここでまとめます。記録を伴わない打ち切り判定だけが要るときは AlreadySucceeded を
+// 使ってください。
 //
 //	done, err := rec.Begin(ctx, task.JobID, newStatus(task, StateRunning),
 //	    func(next, _ *JobStatus) { next.Attempts++ })

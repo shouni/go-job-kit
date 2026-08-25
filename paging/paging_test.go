@@ -97,7 +97,7 @@ func TestSelectIDsDoesNotMutateInput(t *testing.T) {
 
 // sortKey は、ID の文字列比較がプレフィックス順になってしまう一覧のためのもの。
 // 用途ごとに異なるプレフィックスが混在すると、これが無いと古いジョブが先頭に来ます。
-func TestSelectIDsWithSortKey(t *testing.T) {
+func TestSelectIDsUsesSortKey(t *testing.T) {
 	t.Parallel()
 
 	ids := []string{
@@ -124,7 +124,7 @@ func TestSelectIDsWithSortKey(t *testing.T) {
 }
 
 // キーが同値のときは ID の降順で安定させること。
-func TestSelectIDsWithSortKeyBreaksTiesByID(t *testing.T) {
+func TestSelectIDsBreaksTiesByID(t *testing.T) {
 	t.Parallel()
 
 	ids := []string{"mv-20260711-010101-aaa", "mv-20260711-010101-ccc", "mv-20260711-010101-bbb"}

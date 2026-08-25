@@ -42,7 +42,7 @@ func TestLoadPageKeepsSelectionOrder(t *testing.T) {
 }
 
 // ソートキーは引数で必ず選ばせること（既定のまま呼べる形にしない）。
-func TestLoadPageWithSortKey(t *testing.T) {
+func TestLoadPageUsesSortKey(t *testing.T) {
 	t.Parallel()
 
 	// {用途}-{時刻} 形式。ID の文字列比較では用途プレフィックス順になってしまう。
