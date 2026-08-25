@@ -167,6 +167,83 @@ func TestGetReturnsErrorForCorruptedJSON(t *testing.T) {
 	}
 }
 
+// 途中で切れた書き込みに次の書き込みが続いた status.json を、黙って読まないこと。
+//
+// 従来の json.Decoder は JSON 値のあとに残ったバイト列を無視するため、
+// 1 つ目だけを読んで成功を返していました。破損に気づけないまま、その値で
+// 判断が進みます。
+func TestGetRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+
+	store := newMemStore()
+	store.files[testStatusPath] = []byte(
+		`{"job_id":"` + testJobID + `","state":"succeeded"}{"state":"running"}`)
+
+	_, err := newStore(store).Get(context.Background(), testJobID)
+	if err == nil {
+		t.Fatal("Get() error = nil, want a decode error（末尾のバイト列を無視している）")
+	}
+	if errors.Is(err, jobstatus.ErrNotFound) {
+		t.Error("壊れた JSON が未記録として扱われている")
+	}
+}
+
+// **重複したキーを拒否すること。**
+//
+// 従来の json.Decoder は後勝ちで読むため、succeeded を書いた記録に running が
+// 続いた形の破損が running として読めていました。再実行ガードが防いでいるはずの
+// 巻き戻しが、記録ではなく読み取りの側から入ってくる経路です。
+func TestGetRejectsDuplicateKeys(t *testing.T) {
+	t.Parallel()
+
+	store := newMemStore()
+	store.files[testStatusPath] = []byte(
+		`{"job_id":"` + testJobID + `","state":"succeeded","state":"running"}`)
+
+	got, err := newStore(store).Get(context.Background(), testJobID)
+	if err == nil {
+		t.Fatalf("Get() error = nil, want a decode error（state = %q として読めている）", got.State)
+	}
+	if errors.Is(err, jobstatus.ErrNotFound) {
+		t.Error("壊れた JSON が未記録として扱われている")
+	}
+}
+
+// 題目や失敗理由に & < > が含まれても、そのまま読める形で保存すること。
+// v1 の \u0026 形式も引き続き読めます（JSON として同値なため）。
+func TestSaveDoesNotEscapeHTML(t *testing.T) {
+	t.Parallel()
+
+	store := newMemStore()
+	err := newStore(store).Save(context.Background(), testJobID, appStatus{
+		State: jobstatus.StateFailed,
+		Title: "A & B <tag>",
+		Error: `boom "x" & y`,
+	})
+	if err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	written := string(store.files[testStatusPath])
+	if strings.Contains(written, `\u0026`) || strings.Contains(written, `\u003c`) {
+		t.Errorf("& や < が \\u00XX へ逃がされている: %s", written)
+	}
+	if !strings.Contains(written, "A & B <tag>") {
+		t.Errorf("題目がそのまま書かれていない: %s", written)
+	}
+
+	// v1 が書いた既存の status.json も読めること。
+	store.files[testStatusPath] = []byte(
+		`{"job_id":"` + testJobID + `","state":"failed","title":"A \u0026 B \u003ctag\u003e"}`)
+	got, err := newStore(store).Get(context.Background(), testJobID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.Title != "A & B <tag>" {
+		t.Errorf("Title = %q, want %q", got.Title, "A & B <tag>")
+	}
+}
+
 // job_id を持たない古い記録でも、呼び出し側が ID 無しの値を受け取らないこと。
 func TestGetBackfillsMissingJobID(t *testing.T) {
 	t.Parallel()
