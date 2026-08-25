@@ -3,7 +3,7 @@ package jobstatus
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"os"
@@ -15,22 +15,41 @@ import (
 	"github.com/shouni/go-utils/jobid"
 )
 
-// ErrNotFound は、ジョブ状態がまだ記録されていないことを表します。
+// Store が返す 3 つの分類です。いずれも原因を包んだまま返すので、errors.Is の
+// 判定はそのままに、ログには元の失敗理由が残ります。
 //
-// 「状態が無い」は正常な状態（記録前の投入や、この機能より前に作られたジョブ）なので、
-// 呼び出し側がストレージ障害と区別できるよう独立したエラーにしています。
-// HTTP ハンドラーはこれを 404 に、それ以外を 500 にマップしてください。
-var ErrNotFound = errors.New("job status not found")
+// HTTP ハンドラーは次のようにマップしてください。分類ごとに呼び出し側が取るべき
+// 判断が違うため、まとめると必ずどちらかを取り違えます。
+//
+//	ErrInvalidJobID → 400  入力が不正。再試行しても直らない
+//	ErrNotFound     → 404  未記録。処理を先へ進めてよい
+//	ErrUnavailable  → 503  読めなかっただけ。あとで読めるかもしれない
+//	その他          → 500  壊れた JSON など
+var (
+	// ErrNotFound は、ジョブ状態がまだ記録されていないことを表します。
+	// 記録前の投入や、この機能より前に作られたジョブでも起こる正常な状態です。
+	ErrNotFound = errors.New("job status not found")
 
-// ErrUnavailable は、ジョブ状態が「存在するはずなのに読めなかった」ことを表します。
-//
-// ErrNotFound と分けているのは、両者で取るべき判断が正反対だからです。記録が無いなら
-// 処理を進めてよい一方、読めなかっただけの場合に「無い」とみなすと、完了済みのジョブを
-// 未完了と誤認して生成をまるごとやり直します（Recorder.AlreadySucceeded を参照）。
-//
-// 切り分けは remoteio が返す os.ErrNotExist で行います。追加のストレージ往復は不要です。
-// HTTP ハンドラーは ErrNotFound を 404 に、これを 503（または 500）にマップしてください。
-var ErrUnavailable = errors.New("job status unavailable")
+	// ErrUnavailable は、ジョブ状態が「存在するはずなのに読めなかった」ことを
+	// 表します。
+	//
+	// ErrNotFound と分けているのは、両者で取るべき判断が正反対だからです。記録が
+	// 無いなら処理を進めてよい一方、読めなかっただけの場合に「無い」とみなすと、
+	// 完了済みのジョブを未完了と誤認して生成をまるごとやり直します
+	// （Recorder.AlreadySucceeded を参照）。
+	//
+	// 切り分けは remoteio が返す os.ErrNotExist で行うため、追加のストレージ
+	// 往復は要りません。
+	ErrUnavailable = errors.New("job status unavailable")
+
+	// ErrInvalidJobID は、渡されたジョブ ID が正規化を通らなかったことを表します。
+	//
+	// これが独立していないと、ハンドラーは URL に紛れ込んだ不正な ID をストレージ
+	// 障害と同じ 5xx で返すことになり、再試行しても直らないリクエストを再試行
+	// させます。原因は jobid のエラーとして残るので、errors.Is で jobid.ErrEmpty /
+	// jobid.ErrTooLong / jobid.ErrInvalidFormat まで辿れます。
+	ErrInvalidJobID = errors.New("invalid job id")
+)
 
 // contentType はジョブ状態 JSON の Content-Type です。
 const contentType = "application/json; charset=utf-8"
@@ -108,6 +127,10 @@ func NewStore[T any](reader remoteio.Reader, writer remoteio.OutputWriter, locat
 // 状態ファイルは常に最新の 1 世代だけを保持し、上書きで更新します。
 // status が Status を埋め込んでいれば、JobID と UpdatedAt はここで打刻されます
 // （引数の値は変更しません）。
+//
+// エンコードは Get と揃えて encoding/json/v2 を使います。v1 と違い &・<・> を
+// \u00XX へ逃がさないため、題目や失敗理由を含む status.json がそのまま読めます
+// （JSON としては同値で、フィールドの並びも埋め込みの展開も v1 と一致します）。
 func (s *Store[T]) Save(ctx context.Context, jobID string, status T) error {
 	uri, safeJobID, err := s.resolve(jobID)
 	if err != nil {
@@ -140,6 +163,13 @@ func (s *Store[T]) Save(ctx context.Context, jobID string, status T) error {
 //
 // 壊れた JSON は未記録ではなくデコード失敗として返します。未記録と同じ扱いにすると、
 // 破損に気づかないまま再生成が走り続けるためです。
+//
+// デコードは encoding/json/v2 の UnmarshalRead で行います。JSON 値のあとに残った
+// バイト列と、重複したキーを拒否するためです。従来の Decoder はどちらも黙って
+// 受け取っていました。とくに重複キーは後勝ちで、途中で切れた書き込みに次の書き込みが
+// 続いた status.json が {"state":"succeeded",...,"state":"running"} の形になると、
+// running として読めてしまいます。これは再実行ガードが防いでいるはずの巻き戻しが、
+// 記録ではなく読み取りの側から入ってくる経路です。
 func (s *Store[T]) Get(ctx context.Context, jobID string) (T, error) {
 	var status T
 
@@ -165,7 +195,7 @@ func (s *Store[T]) Get(ctx context.Context, jobID string) (T, error) {
 	}
 	defer func() { _ = rc.Close() }()
 
-	if err := json.NewDecoder(rc).Decode(&status); err != nil {
+	if err := json.UnmarshalRead(rc, &status); err != nil {
 		var zero T
 		return zero, fmt.Errorf("jobstatus: decode (%s): %w", safeJobID, err)
 	}
@@ -200,7 +230,7 @@ func (s *Store[T]) Delete(ctx context.Context, jobID string) error {
 func (s *Store[T]) resolve(jobID string) (uri string, safeJobID string, err error) {
 	safeJobID, err = jobid.Sanitize(jobID)
 	if err != nil {
-		return "", "", fmt.Errorf("jobstatus: %w", err)
+		return "", "", fmt.Errorf("%w: %w", ErrInvalidJobID, err)
 	}
 	if s.locate == nil {
 		return "", "", errors.New("jobstatus: locator is not configured")

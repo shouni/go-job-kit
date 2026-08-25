@@ -38,6 +38,9 @@ type Carrier interface {
 //
 // 3 は、状態はあくまで観測のための記録であり、書けなかったことを理由に生成を
 // 中断するほうが害が大きいためです。
+//
+// ワーカーの入口では 1 と 2 が必ず並んで呼ばれるため、その組み合わせは Begin に
+// まとめてあります。
 type Recorder[T any] struct {
 	store  StatusStore[T]
 	logger *slog.Logger
@@ -135,10 +138,19 @@ func (r *Recorder[T]) AlreadySucceeded(ctx context.Context, jobID string) (bool,
 // 失敗は引き継ぎ元を失っている（Attempts・QueuedAt がこの記録でリセットされる）ため、
 // 警告ログを残します。
 //
-//	// 処理開始を記録し、試行回数を 1 つ進める
-//	rec.Record(ctx, task.JobID, newStatus(task, StateRunning), func(next, _ *JobStatus) {
-//	    next.Attempts++
+//	// 投入を記録し、前回の成果物の在り処を残す
+//	rec.Record(ctx, req.JobID, newStatus(req, StateQueued), func(next, prev *JobStatus) {
+//	    if prev != nil {
+//	        next.OutputDir = prev.OutputDir
+//	    }
 //	})
+//
+// 前回が終了済み（IsTerminal）のとき、今回が running・failed なら保存しません
+// （queued は例外です。理由は rolledBack を参照）。判定に使う前回の記録は引き継ぎの
+// ために既に読んでいるので、ストレージへの往復は増えません。
+//
+// 処理開始（running）の記録は Begin を使ってください。再実行ガードと同じ読み取りに
+// 相乗りできます。
 //
 // 保存に失敗しても呼び出し側へは伝えず、警告ログに留めます。
 func (r *Recorder[T]) Record(ctx context.Context, jobID string, status T, apply ...func(next, prev *T)) {
@@ -146,20 +158,88 @@ func (r *Recorder[T]) Record(ctx context.Context, jobID string, status T, apply 
 		return
 	}
 
-	var prev *T
-	if previous, err := r.store.Get(ctx, jobID); err == nil {
-		prev = &previous
-		if next, ok := any(&status).(Carrier); ok {
-			if old, ok := any(&previous).(Carrier); ok {
-				next.CarryOver(old.Common())
-			}
-		}
-	} else if !errors.Is(err, ErrNotFound) {
-		// 未記録は初回の記録なので正常。それ以外（読み取り失敗・壊れた JSON）は
-		// 引き継ぎが失われ、Attempts・QueuedAt がこの記録でリセットされるため、
-		// 静かに進めず原因を残す。記録そのものは行う（観測の欠けを理由に増やさない）。
+	prev, prevCommon, err := r.previous(ctx, jobID)
+	if err != nil {
+		// 未記録は初回の記録なので previous が握り潰している。ここへ来るのは
+		// 読み取り失敗・壊れた JSON で、引き継ぎが失われ Attempts・QueuedAt が
+		// この記録でリセットされるため、静かに進めず原因を残す。記録そのものは
+		// 行う（観測の欠けを理由に失敗を増やさない）。
 		r.logger.WarnContext(ctx, "failed to read previous job status; carry-over skipped",
 			"job_id", jobID, "error", err)
+	}
+
+	r.save(ctx, jobID, status, prev, prevCommon, apply)
+}
+
+// Begin は、再実行ガードと処理開始の記録を 1 回の読み取りで行います。
+// 完了済みで何もしなかった場合に true を返します。
+//
+// AlreadySucceeded で打ち切りを判定してから Record で running を書くと、Record が
+// 引き継ぎのために前回の記録を読み直すため、同じ status.json を 1 タスクで 2 度
+// 取得することになります。判定に要る情報は引き継ぎ元とまったく同じなので、
+// ここでまとめます。記録を伴わない打ち切り判定だけが要るときは AlreadySucceeded を
+// 使ってください。
+//
+//	done, err := rec.Begin(ctx, task.JobID, newStatus(task, StateRunning),
+//	    func(next, _ *JobStatus) { next.Attempts++ })
+//	if err != nil {
+//	    return err // 判定できないので再配信に委ねる
+//	}
+//	if done {
+//	    return nil
+//	}
+//
+// 打ち切りの判断は AlreadySucceeded と同じです。未記録は「完了していない」として
+// false を返し、読めなかった場合はエラーを返します（理由は AlreadySucceeded を
+// 参照）。エラーを返すときは記録も行いません。引き継ぎ元を失ったまま Attempts と
+// QueuedAt をリセットした running を書き残しても、呼び出し側はそのまま再配信へ
+// 委ねるだけだからです。
+//
+// 渡す status は処理開始（running）を表すものにしてください。投入（queued）の記録は
+// 再実行ガードの対象ではないので Record を使います。
+func (r *Recorder[T]) Begin(ctx context.Context, jobID string, status T, apply ...func(next, prev *T)) (bool, error) {
+	if !r.Enabled() {
+		return false, nil
+	}
+
+	prev, prevCommon, err := r.previous(ctx, jobID)
+	if err != nil {
+		return false, err
+	}
+	if prevCommon != nil && prevCommon.IsTerminal() {
+		return true, nil
+	}
+
+	r.save(ctx, jobID, status, prev, prevCommon, apply)
+	return false, nil
+}
+
+// previous は前回の記録を読み、値と共通フィールドを返します。
+//
+// 未記録（ErrNotFound）は初回の記録として正常なので、エラーではなく「前回なし」
+// （いずれも nil）として返します。Status を埋め込んでいない型では共通フィールドが
+// nil になり、引き継ぎも巻き戻しの判定も行われません。
+func (r *Recorder[T]) previous(ctx context.Context, jobID string) (*T, *Status, error) {
+	status, err := r.store.Get(ctx, jobID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+
+	if c, ok := common(&status); ok {
+		return &status, &c, nil
+	}
+	return &status, nil, nil
+}
+
+// save は引き継ぎ・apply・巻き戻しの判定を通してから保存します。
+func (r *Recorder[T]) save(ctx context.Context, jobID string, status T, prev *T, prevCommon *Status, apply []func(next, prev *T)) {
+	if prevCommon != nil {
+		if next, ok := any(&status).(Carrier); ok {
+			next.CarryOver(*prevCommon)
+		}
 	}
 
 	for _, fn := range apply {
@@ -168,11 +248,49 @@ func (r *Recorder[T]) Record(ctx context.Context, jobID string, status T, apply 
 		}
 	}
 
+	// 巻き戻しの判定は apply の後で行います。apply は状態を書き換えられるため、
+	// 実際に保存される値で見ないと素通りします。
+	next, hasCommon := common(&status)
+	if rolledBack(prevCommon, next, hasCommon) {
+		r.logger.InfoContext(ctx, "skipped job status record; job already finished",
+			"job_id", jobID, "state", next.State, "recorded_state", prevCommon.State)
+		return
+	}
+
 	if err := r.store.Save(ctx, jobID, status); err != nil {
 		attrs := []any{"job_id", jobID, "error", err}
-		if carrier, ok := any(&status).(Carrier); ok {
-			attrs = append(attrs, "state", carrier.Common().State)
+		if hasCommon {
+			attrs = append(attrs, "state", next.State)
 		}
 		r.logger.WarnContext(ctx, "failed to record job status", attrs...)
 	}
+}
+
+// rolledBack は、前回が終了済みなのに今回がそうでない記録かどうかを返します。
+//
+// Cloud Tasks の再配信で完了済みのジョブが running や failed へ巻き戻ると、
+// ポーリング中の画面も再実行ガードも「まだ終わっていない」と読みます。
+// AlreadySucceeded が守ろうとしているものを、記録の側から崩さないためのものです。
+//
+// queued は例外です。再配信されたタスクが書くのは running か failed であり、
+// queued を書くのはハンドラーを通った新しい依頼だけだからです。同じジョブ ID での
+// 再投入は移植元で普通に起こります（呼び出し元が job_id を指定する経路と、履歴から
+// 同じ ID で作り直す経路の両方があります）。ここで queued まで弾くと、記録は
+// succeeded のまま残り、ワーカーの再実行ガードがその作り直しを「完了済み」と読んで
+// 一度も実行しないまま打ち切ります。防ぐはずの取りこぼしを、ガード自身が作ります。
+func rolledBack(prev *Status, next Status, hasCommon bool) bool {
+	if prev == nil || !hasCommon || !prev.IsTerminal() {
+		return false
+	}
+	return !next.IsTerminal() && next.State != StateQueued
+}
+
+// common は、Status を埋め込んだ値から共通フィールドを取り出します。
+// 埋め込んでいない型では ok が false になり、引き継ぎも巻き戻しの判定も行われません。
+func common[T any](status *T) (Status, bool) {
+	carrier, ok := any(status).(Carrier)
+	if !ok {
+		return Status{}, false
+	}
+	return carrier.Common(), true
 }

@@ -75,7 +75,9 @@ func TestExpiredEntryIsNotReturned(t *testing.T) {
 		defer c.Close()
 
 		c.Set("job-1", "value")
-		time.Sleep(60 * time.Millisecond)
+		// Sleep だけでは回収ゴルーチンが走った保証がありません。
+		// synctest.Sleep は時計を進めたうえで、ほかが落ち着くまで待ちます。
+		synctest.Sleep(60 * time.Millisecond)
 
 		if _, ok := c.Get("job-1"); ok {
 			t.Error("期限切れの値が返っている")
@@ -97,8 +99,7 @@ func TestExpiredEntryIsEvicted(t *testing.T) {
 		// 回収は NewTTL が起動したゴルーチンが行います。Sleep で保持期間を過ぎさせ、
 		// Wait でその回収が終わるまで待ちます。「いつかは回収されるはず」と
 		// 期限を切ってポーリングする必要はありません。
-		time.Sleep(30 * time.Millisecond)
-		synctest.Wait()
+		synctest.Sleep(30 * time.Millisecond)
 
 		if got := c.Len(); got != 0 {
 			t.Errorf("Len() = %d, want 0（期限切れエントリが回収されていない）", got)
