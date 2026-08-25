@@ -24,7 +24,7 @@ func TestLoadPageKeepsSelectionOrder(t *testing.T) {
 	t.Parallel()
 
 	jobIDs := []string{"job-01", "job-05", "job-03", "job-04", "job-02"}
-	items, meta, err := paging.LoadPage(context.Background(), jobIDs, 1, 3,
+	items, meta, err := paging.LoadPage(context.Background(), jobIDs, 1, 3, nil,
 		func(_ context.Context, jobID string) (string, error) {
 			return jobID, nil
 		})
@@ -41,18 +41,18 @@ func TestLoadPageKeepsSelectionOrder(t *testing.T) {
 	}
 }
 
-// ソートキーは SelectIDs と同じオプションで渡せること。
-func TestLoadPageWithSortKey(t *testing.T) {
+// ソートキーは引数で必ず選ばせること（既定のまま呼べる形にしない）。
+func TestLoadPageUsesSortKey(t *testing.T) {
 	t.Parallel()
 
 	// {用途}-{時刻} 形式。ID の文字列比較では用途プレフィックス順になってしまう。
 	jobIDs := []string{"mv-300", "recipe-100", "short-200"}
 	items, _, err := paging.LoadPage(context.Background(), jobIDs, 1, 3,
-		func(_ context.Context, jobID string) (string, error) { return jobID, nil },
-		paging.WithSortKey(func(jobID string) string {
+		func(jobID string) string {
 			_, ts, _ := strings.Cut(jobID, "-")
 			return ts
-		}))
+		},
+		func(_ context.Context, jobID string) (string, error) { return jobID, nil })
 	if err != nil {
 		t.Fatalf("LoadPage() error = %v", err)
 	}
@@ -69,7 +69,7 @@ func TestLoadPageSkipsFailedItems(t *testing.T) {
 	t.Parallel()
 
 	jobIDs := []string{"job-01", "job-02", "job-03", "job-04"}
-	items, meta, err := paging.LoadPage(context.Background(), jobIDs, 1, 4,
+	items, meta, err := paging.LoadPage(context.Background(), jobIDs, 1, 4, nil,
 		func(_ context.Context, jobID string) (string, error) {
 			if jobID == "job-03" {
 				return "", errors.New("broken metadata")
@@ -99,7 +99,7 @@ func TestLoadPageReturnsContextError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, _, err := paging.LoadPage(ctx, []string{"job-01", "job-02"}, 1, 2,
+	_, _, err := paging.LoadPage(ctx, []string{"job-01", "job-02"}, 1, 2, nil,
 		func(ctx context.Context, jobID string) (string, error) {
 			return jobID, ctx.Err()
 		}, discardLogger())
@@ -112,7 +112,7 @@ func TestLoadPageReturnsContextError(t *testing.T) {
 func TestLoadPageWithFallbackInsideLoad(t *testing.T) {
 	t.Parallel()
 
-	items, meta, err := paging.LoadPage(context.Background(), []string{"job-01", "job-02"}, 1, 2,
+	items, meta, err := paging.LoadPage(context.Background(), []string{"job-01", "job-02"}, 1, 2, nil,
 		func(_ context.Context, jobID string) (string, error) {
 			if jobID == "job-01" {
 				return "placeholder:" + jobID, nil
@@ -142,7 +142,7 @@ func TestLoadPageLimitsConcurrency(t *testing.T) {
 	}
 
 	var inFlight, peak atomic.Int64
-	_, _, err := paging.LoadPage(context.Background(), jobIDs, 1, 0,
+	_, _, err := paging.LoadPage(context.Background(), jobIDs, 1, 0, nil,
 		func(_ context.Context, jobID string) (string, error) {
 			current := inFlight.Add(1)
 			defer inFlight.Add(-1)
@@ -186,7 +186,7 @@ func TestLoadPageStopsAcquiringAfterCancel(t *testing.T) {
 		var err error
 		go func() {
 			defer close(done)
-			_, _, err = paging.LoadPage(ctx, []string{"job-01", "job-02"}, 1, 10, load,
+			_, _, err = paging.LoadPage(ctx, []string{"job-01", "job-02"}, 1, 10, nil, load,
 				paging.WithConcurrency(1), discardLogger())
 		}()
 
@@ -212,7 +212,7 @@ func TestLoadPageStopsAcquiringAfterCancel(t *testing.T) {
 func TestLoadPageWithoutPaging(t *testing.T) {
 	t.Parallel()
 
-	items, meta, err := paging.LoadPage(context.Background(), []string{"job-01", "job-02"}, 1, 0,
+	items, meta, err := paging.LoadPage(context.Background(), []string{"job-01", "job-02"}, 1, 0, nil,
 		func(_ context.Context, jobID string) (string, error) { return jobID, nil })
 	if err != nil {
 		t.Fatalf("LoadPage() error = %v", err)
@@ -229,7 +229,7 @@ func TestLoadPageWithoutPaging(t *testing.T) {
 func TestLoadPageWithNoJobs(t *testing.T) {
 	t.Parallel()
 
-	items, meta, err := paging.LoadPage(context.Background(), nil, 1, 10,
+	items, meta, err := paging.LoadPage(context.Background(), nil, 1, 10, nil,
 		func(_ context.Context, jobID string) (string, error) { return jobID, nil })
 	if err != nil {
 		t.Fatalf("LoadPage() error = %v", err)
@@ -250,7 +250,7 @@ func TestLoadPageDoesNotMutateInput(t *testing.T) {
 	jobIDs := []string{"job-01", "job-03", "job-02"}
 	original := slices.Clone(jobIDs)
 
-	if _, _, err := paging.LoadPage(context.Background(), jobIDs, 1, 2,
+	if _, _, err := paging.LoadPage(context.Background(), jobIDs, 1, 2, nil,
 		func(_ context.Context, jobID string) (string, error) { return jobID, nil }); err != nil {
 		t.Fatalf("LoadPage() error = %v", err)
 	}

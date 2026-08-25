@@ -28,52 +28,45 @@ type PageMeta struct {
 }
 
 // SortKeyFunc は、ジョブ ID から並べ替えに使う文字列を取り出します。
-// 戻り値の降順が「新しい順」になるよう実装してください。
+// 戻り値の降順が「新しい順」になるよう実装してください（選び方は SelectIDs を参照）。
 type SortKeyFunc func(jobID string) string
 
 type options struct {
-	sortKey     SortKeyFunc
 	concurrency int
 	logger      *slog.Logger
 }
 
-// Option は SelectIDs / LoadPage の挙動を変更します。
-//
-// どのオプションがどちらに効くかは、それぞれのドキュメントを参照してください
-// （SelectIDs は並べ替えだけを行うため、読み込みに関するオプションは無視します）。
+// Option は LoadPage の挙動を変更します。
+// SelectIDs は読み込みを行わないため、いずれのオプションも影響しません。
 type Option func(*options)
-
-// WithSortKey は、ジョブ ID そのものではなく、そこから取り出した文字列で並べ替えます。
-//
-// 既定では ID の降順がそのまま新しい順になることを前提にしています
-// （go-utils/jobid が生成する時刻プレフィックス付き ID がこれを満たします）。
-// 用途ごとに異なるプレフィックスを付けた ID が同じ一覧に混在する場合、ID の文字列比較は
-// プレフィックス順になってしまいます（時刻部分より前に差が出るため）。その場合は
-// 埋め込まれたタイムスタンプを取り出す関数をここへ渡してください。
-//
-// キーが空文字を返した ID は末尾に回ります（降順で空文字が最小になるため）。
-// キーが同値のときは ID の降順で安定させます。
-func WithSortKey(fn SortKeyFunc) Option {
-	return func(o *options) { o.sortKey = fn }
-}
 
 // SelectIDs は jobIDs を新しい順に並べ替え、指定ページ分を切り出します。
 //
+// sortKey は並べ替えに使うキーの取り出し方で、呼び出し側が必ず選びます。
+// オプションではなく引数なのは、既定を置くと間違った既定のまま呼べてしまうからです。
+// ここで誤っても一覧は正常に返り、順序だけが静かに崩れます。
+//
+//   - 時刻を埋め込んだ ID なら go-utils の jobid.SortKey を渡してください。
+//     用途ごとに異なるプレフィックスを付けた ID が同じ一覧に混在する場合や、
+//     採番の形式が途中で変わった場合、ID の文字列比較は時刻ではなくプレフィックスの
+//     順になります（時刻部分より前に差が出るため）。移植元のアプリはいずれも
+//     この状態にあります。
+//   - nil を渡すと ID そのものの降順で並べます。ID が単一のプレフィックスを共有し、
+//     その直後に時刻が来る場合にだけ正しい並びになります。
+//
+// キーが空文字を返した ID は末尾に回ります（降順で空文字が最小になるため）。
+// キーが同値のときは ID の降順で安定させます。
+//
 // 引数のスライスは変更しません（並べ替えは複製に対して行います）。
 // page が範囲外のときは最終ページへ丸めます。
-func SelectIDs(jobIDs []string, page int, perPage int, opts ...Option) ([]string, PageMeta) {
-	cfg := options{}
-	for _, opt := range opts {
-		opt(&cfg)
-	}
-
+func SelectIDs(jobIDs []string, page int, perPage int, sortKey SortKeyFunc) ([]string, PageMeta) {
 	if page < 1 {
 		page = 1
 	}
 
 	sorted := make([]string, len(jobIDs))
 	copy(sorted, jobIDs)
-	sortDesc(sorted, cfg.sortKey)
+	sortDesc(sorted, sortKey)
 
 	total := len(sorted)
 	totalPages := 0

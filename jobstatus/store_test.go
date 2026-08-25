@@ -40,7 +40,7 @@ func TestSaveWritesInsideJobDirectory(t *testing.T) {
 
 	store := newMemStore()
 	err := newStore(store).Save(context.Background(), testJobID, appStatus{
-		Status: jobstatus.Status{Command: "generate", State: jobstatus.StateQueued},
+		Command: "generate", State: jobstatus.StateQueued,
 	})
 	if err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -56,12 +56,10 @@ func TestSaveAndGetRoundTrip(t *testing.T) {
 
 	store := newStore(newMemStore())
 	original := appStatus{
-		Status: jobstatus.Status{
-			Command:  "generate",
-			State:    jobstatus.StateSucceeded,
-			Title:    "テスト作品",
-			Attempts: 3,
-		},
+		Command:   "generate",
+		State:     jobstatus.StateSucceeded,
+		Title:     "テスト作品",
+		Attempts:  3,
 		OutputDir: testBaseURI + "/" + testJobID,
 	}
 	if err := store.Save(context.Background(), testJobID, original); err != nil {
@@ -100,7 +98,7 @@ func TestStoredJSONStaysFlat(t *testing.T) {
 
 	store := newMemStore()
 	err := newStore(store).Save(context.Background(), testJobID, appStatus{
-		Status:    jobstatus.Status{Command: "generate", State: jobstatus.StateRunning},
+		Command: "generate", State: jobstatus.StateRunning,
 		OutputDir: "gs://bucket/jobs/x",
 	})
 	if err != nil {
@@ -169,6 +167,83 @@ func TestGetReturnsErrorForCorruptedJSON(t *testing.T) {
 	}
 }
 
+// 途中で切れた書き込みに次の書き込みが続いた status.json を、黙って読まないこと。
+//
+// 従来の json.Decoder は JSON 値のあとに残ったバイト列を無視するため、
+// 1 つ目だけを読んで成功を返していました。破損に気づけないまま、その値で
+// 判断が進みます。
+func TestGetRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+
+	store := newMemStore()
+	store.files[testStatusPath] = []byte(
+		`{"job_id":"` + testJobID + `","state":"succeeded"}{"state":"running"}`)
+
+	_, err := newStore(store).Get(context.Background(), testJobID)
+	if err == nil {
+		t.Fatal("Get() error = nil, want a decode error（末尾のバイト列を無視している）")
+	}
+	if errors.Is(err, jobstatus.ErrNotFound) {
+		t.Error("壊れた JSON が未記録として扱われている")
+	}
+}
+
+// **重複したキーを拒否すること。**
+//
+// 従来の json.Decoder は後勝ちで読むため、succeeded を書いた記録に running が
+// 続いた形の破損が running として読めていました。再実行ガードが防いでいるはずの
+// 巻き戻しが、記録ではなく読み取りの側から入ってくる経路です。
+func TestGetRejectsDuplicateKeys(t *testing.T) {
+	t.Parallel()
+
+	store := newMemStore()
+	store.files[testStatusPath] = []byte(
+		`{"job_id":"` + testJobID + `","state":"succeeded","state":"running"}`)
+
+	got, err := newStore(store).Get(context.Background(), testJobID)
+	if err == nil {
+		t.Fatalf("Get() error = nil, want a decode error（state = %q として読めている）", got.State)
+	}
+	if errors.Is(err, jobstatus.ErrNotFound) {
+		t.Error("壊れた JSON が未記録として扱われている")
+	}
+}
+
+// 題目や失敗理由に & < > が含まれても、そのまま読める形で保存すること。
+// v1 の \u0026 形式も引き続き読めます（JSON として同値なため）。
+func TestSaveDoesNotEscapeHTML(t *testing.T) {
+	t.Parallel()
+
+	store := newMemStore()
+	err := newStore(store).Save(context.Background(), testJobID, appStatus{
+		State: jobstatus.StateFailed,
+		Title: "A & B <tag>",
+		Error: `boom "x" & y`,
+	})
+	if err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	written := string(store.files[testStatusPath])
+	if strings.Contains(written, `\u0026`) || strings.Contains(written, `\u003c`) {
+		t.Errorf("& や < が \\u00XX へ逃がされている: %s", written)
+	}
+	if !strings.Contains(written, "A & B <tag>") {
+		t.Errorf("題目がそのまま書かれていない: %s", written)
+	}
+
+	// v1 が書いた既存の status.json も読めること。
+	store.files[testStatusPath] = []byte(
+		`{"job_id":"` + testJobID + `","state":"failed","title":"A \u0026 B \u003ctag\u003e"}`)
+	got, err := newStore(store).Get(context.Background(), testJobID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.Title != "A & B <tag>" {
+		t.Errorf("Title = %q, want %q", got.Title, "A & B <tag>")
+	}
+}
+
 // job_id を持たない古い記録でも、呼び出し側が ID 無しの値を受け取らないこと。
 func TestGetBackfillsMissingJobID(t *testing.T) {
 	t.Parallel()
@@ -193,7 +268,7 @@ func TestSaveNormalizesPathTraversalJobID(t *testing.T) {
 
 	// "../../etc/passwd" は末尾要素 "passwd" へ正規化され、baseURI 配下に収まる。
 	err := newStore(store).Save(context.Background(), "../../etc/passwd", appStatus{
-		Status: jobstatus.Status{State: jobstatus.StateQueued},
+		State: jobstatus.StateQueued,
 	})
 	if err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -213,7 +288,7 @@ func TestSaveRejectsInvalidJobID(t *testing.T) {
 	store := newMemStore()
 
 	err := newStore(store).Save(context.Background(), "日本語", appStatus{
-		Status: jobstatus.Status{State: jobstatus.StateQueued},
+		State: jobstatus.StateQueued,
 	})
 	if err == nil {
 		t.Fatal("Save() error = nil, want an error")
@@ -232,7 +307,7 @@ func TestSaveOverwritesPreviousStatus(t *testing.T) {
 	ctx := context.Background()
 
 	for _, state := range []jobstatus.State{jobstatus.StateQueued, jobstatus.StateRunning, jobstatus.StateSucceeded} {
-		if err := s.Save(ctx, testJobID, appStatus{Status: jobstatus.Status{State: state}}); err != nil {
+		if err := s.Save(ctx, testJobID, appStatus{State: state}); err != nil {
 			t.Fatalf("Save(%q) error = %v", state, err)
 		}
 	}
@@ -255,7 +330,7 @@ func TestSaveOverwritesPreviousStatus(t *testing.T) {
 func TestSaveDoesNotMutateArgument(t *testing.T) {
 	t.Parallel()
 
-	status := appStatus{Status: jobstatus.Status{State: jobstatus.StateQueued}}
+	status := appStatus{State: jobstatus.StateQueued}
 
 	if err := newStore(newMemStore()).Save(context.Background(), testJobID, status); err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -273,7 +348,7 @@ func TestSavePassesWriteOptions(t *testing.T) {
 
 	store := newMemStore()
 	err := newStore(store).Save(context.Background(), testJobID, appStatus{
-		Status: jobstatus.Status{State: jobstatus.StateQueued},
+		State: jobstatus.StateQueued,
 	})
 	if err != nil {
 		t.Fatalf("Save() error = %v", err)
@@ -293,7 +368,7 @@ func TestDeleteRemovesStatus(t *testing.T) {
 	s := newStore(store)
 	ctx := context.Background()
 
-	if err := s.Save(ctx, testJobID, appStatus{Status: jobstatus.Status{State: jobstatus.StateFailed}}); err != nil {
+	if err := s.Save(ctx, testJobID, appStatus{State: jobstatus.StateFailed}); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 	if err := s.Delete(ctx, testJobID); err != nil {
