@@ -35,8 +35,9 @@ jobs:
       - name: Gofmt check
         run: test -z "$(gofmt -l .)"
 
+      # -shuffle=on はテスト間の暗黙の実行順序依存を検出します。
       - name: Test
-        run: go test ./... -race -cover
+        run: go test -shuffle=on ./... -race -cover
 
   lint:
     name: golangci-lint
