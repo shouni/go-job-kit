@@ -11,7 +11,7 @@ func TestSelectIDsPaginates(t *testing.T) {
 	t.Parallel()
 
 	ids := []string{"c1", "c3", "c2", "c5", "c4"}
-	selected, meta := SelectIDs(ids, 1, 2)
+	selected, meta := SelectIDs(ids, 1, 2, nil)
 
 	// 降順（新しい順）にソートされた上で先頭2件
 	if want := []string{"c5", "c4"}; !slices.Equal(selected, want) {
@@ -29,7 +29,7 @@ func TestSelectIDsClampsOutOfRangePage(t *testing.T) {
 	t.Parallel()
 
 	ids := []string{"c1", "c2", "c3"}
-	selected, meta := SelectIDs(ids, 99, 2)
+	selected, meta := SelectIDs(ids, 99, 2, nil)
 
 	if meta.Page != 2 {
 		t.Errorf("Page = %d, want clamped to 2 (last page)", meta.Page)
@@ -45,7 +45,7 @@ func TestSelectIDsClampsNonPositivePage(t *testing.T) {
 	t.Parallel()
 
 	for _, page := range []int{0, -1} {
-		_, meta := SelectIDs([]string{"c1", "c2", "c3"}, page, 2)
+		_, meta := SelectIDs([]string{"c1", "c2", "c3"}, page, 2, nil)
 		if meta.Page != 1 {
 			t.Errorf("SelectIDs(page=%d) Page = %d, want 1", page, meta.Page)
 		}
@@ -55,7 +55,7 @@ func TestSelectIDsClampsNonPositivePage(t *testing.T) {
 func TestSelectIDsWithoutPaging(t *testing.T) {
 	t.Parallel()
 
-	selected, meta := SelectIDs([]string{"c1", "c2"}, 1, 0)
+	selected, meta := SelectIDs([]string{"c1", "c2"}, 1, 0, nil)
 
 	if len(selected) != 2 {
 		t.Errorf("selected = %v, want all items when perPage <= 0", selected)
@@ -68,7 +68,7 @@ func TestSelectIDsWithoutPaging(t *testing.T) {
 func TestSelectIDsEmpty(t *testing.T) {
 	t.Parallel()
 
-	selected, meta := SelectIDs(nil, 1, 10)
+	selected, meta := SelectIDs(nil, 1, 10, nil)
 
 	if len(selected) != 0 {
 		t.Errorf("selected = %v, want empty", selected)
@@ -88,14 +88,14 @@ func TestSelectIDsDoesNotMutateInput(t *testing.T) {
 	ids := []string{"c1", "c3", "c2"}
 	original := slices.Clone(ids)
 
-	SelectIDs(ids, 1, 2)
+	SelectIDs(ids, 1, 2, nil)
 
 	if !slices.Equal(ids, original) {
 		t.Errorf("入力が変更された: %v, want %v", ids, original)
 	}
 }
 
-// WithSortKey は、ID の文字列比較がプレフィックス順になってしまう一覧のためのもの。
+// sortKey は、ID の文字列比較がプレフィックス順になってしまう一覧のためのもの。
 // 用途ごとに異なるプレフィックスが混在すると、これが無いと古いジョブが先頭に来ます。
 func TestSelectIDsWithSortKey(t *testing.T) {
 	t.Parallel()
@@ -107,7 +107,7 @@ func TestSelectIDsWithSortKey(t *testing.T) {
 		"no-timestamp-job",
 	}
 
-	selected, meta := SelectIDs(ids, 1, 10, WithSortKey(embeddedTimestamp))
+	selected, meta := SelectIDs(ids, 1, 10, embeddedTimestamp)
 
 	want := []string{
 		"mv-20260711-010101-bbb",
@@ -129,7 +129,7 @@ func TestSelectIDsWithSortKeyBreaksTiesByID(t *testing.T) {
 
 	ids := []string{"mv-20260711-010101-aaa", "mv-20260711-010101-ccc", "mv-20260711-010101-bbb"}
 
-	selected, _ := SelectIDs(ids, 1, 10, WithSortKey(embeddedTimestamp))
+	selected, _ := SelectIDs(ids, 1, 10, embeddedTimestamp)
 
 	want := []string{"mv-20260711-010101-ccc", "mv-20260711-010101-bbb", "mv-20260711-010101-aaa"}
 	if !slices.Equal(selected, want) {

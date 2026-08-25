@@ -27,7 +27,9 @@ func WithLogger(logger *slog.Logger) Option {
 // 後段は 1 ページぶんとはいえ数十回のストレージ読み取りになるため直列にはできず、
 // かといって並行にすると順序が崩れます。その組み立てを 1 か所に集めたものです。
 //
-//	items, meta, err := paging.LoadPage(ctx, jobIDs, page, perPage, repo.loadHistory)
+//	items, meta, err := paging.LoadPage(ctx, jobIDs, page, perPage, jobid.SortKey, repo.loadHistory)
+//
+// sortKey の選び方は SelectIDs を参照してください（並べ替えはそちらへ委ねます）。
 //
 // 振る舞いは次のとおりです。
 //
@@ -53,6 +55,7 @@ func LoadPage[T any](
 	jobIDs []string,
 	page int,
 	perPage int,
+	sortKey SortKeyFunc,
 	load func(ctx context.Context, jobID string) (T, error),
 	opts ...Option,
 ) ([]T, PageMeta, error) {
@@ -67,7 +70,7 @@ func LoadPage[T any](
 		cfg.logger = slog.Default()
 	}
 
-	selectedIDs, meta := SelectIDs(jobIDs, page, perPage, opts...)
+	selectedIDs, meta := SelectIDs(jobIDs, page, perPage, sortKey)
 
 	// 添字へ書き込むことで、ロックを持たずに並行して読みつつ ID の並び順をそのまま
 	// 維持できます。読めなかった要素は nil のまま残し、後段で取り除きます。
