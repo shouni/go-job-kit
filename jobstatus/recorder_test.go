@@ -17,10 +17,11 @@ import (
 
 // fakeStore は jobstatus.StatusStore のインメモリ実装です。
 type fakeStore struct {
-	mu      sync.Mutex
-	saved   map[string]appStatus
-	saveErr error
-	getErr  error
+	mu       sync.Mutex
+	saved    map[string]appStatus
+	saveErr  error
+	getErr   error
+	getCount int
 }
 
 func newFakeStore() *fakeStore {
@@ -31,6 +32,7 @@ func (f *fakeStore) Get(_ context.Context, jobID string) (appStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	f.getCount++
 	if f.getErr != nil {
 		return appStatus{}, f.getErr
 	}
@@ -371,3 +373,202 @@ func (b *bareStore) Save(_ context.Context, jobID string, status bare) error {
 
 // Store をそのまま Recorder へ渡せること（利用側がアダプタを書かずに済むこと）。
 var _ jobstatus.StatusStore[appStatus] = (*jobstatus.Store[appStatus])(nil)
+
+// 完了済みのジョブが再配信されたとき、running や failed で上書きしないこと。
+// 巻き戻すと、ポーリング中の画面も再実行ガードも「まだ終わっていない」と読む。
+func TestRecordDoesNotRollBackFinishedJob(t *testing.T) {
+	t.Parallel()
+
+	for _, state := range []jobstatus.State{jobstatus.StateRunning, jobstatus.StateFailed} {
+		t.Run(string(state), func(t *testing.T) {
+			t.Parallel()
+
+			store := newFakeStore()
+			store.saved[testJobID] = appStatus{
+				JobID: testJobID, State: jobstatus.StateSucceeded, Title: "完了済み",
+			}
+
+			rec := jobstatus.NewRecorder(store,
+				jobstatus.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+			rec.Record(context.Background(), testJobID, appStatus{
+				JobID: testJobID, State: state, Error: "再配信された",
+			})
+
+			if got := store.saved[testJobID].State; got != jobstatus.StateSucceeded {
+				t.Errorf("State = %q, want succeeded（再配信で巻き戻っている）", got)
+			}
+		})
+	}
+}
+
+// apply が状態を書き換える場合も巻き戻しを止めること。
+// 判定が apply の前だと、実際に保存される値と食い違って素通りする。
+func TestRecordChecksRollbackAfterApply(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore()
+	store.saved[testJobID] = appStatus{JobID: testJobID, State: jobstatus.StateSucceeded}
+
+	rec := jobstatus.NewRecorder(store,
+		jobstatus.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	rec.Record(context.Background(), testJobID, appStatus{
+		JobID: testJobID, State: jobstatus.StateSucceeded,
+	}, func(next, _ *appStatus) {
+		next.State = jobstatus.StateRunning // apply が巻き戻す
+	})
+
+	if got := store.saved[testJobID].State; got != jobstatus.StateSucceeded {
+		t.Errorf("State = %q, want succeeded（apply 後の値で判定していない）", got)
+	}
+}
+
+// **完了済みのジョブへ queued を書くのは作り直しの投入なので、通すこと。**
+//
+// 再配信されたタスクが書くのは running か failed で、queued を書くのはハンドラーを
+// 通った新しい依頼だけ。ここで弾くと記録が succeeded のまま残り、ワーカーの
+// 再実行ガードがその作り直しを「完了済み」と読んで一度も実行しない。
+func TestRecordAllowsRequeueAfterSuccess(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore()
+	store.saved[testJobID] = appStatus{
+		JobID:     testJobID,
+		State:     jobstatus.StateSucceeded,
+		Title:     "前回の成果",
+		Attempts:  1,
+		OutputDir: "gs://bucket/jobs/" + testJobID,
+	}
+
+	rec := jobstatus.NewRecorder(store)
+	rec.Record(context.Background(), testJobID, appStatus{
+		JobID: testJobID, State: jobstatus.StateQueued,
+	})
+
+	got := store.saved[testJobID]
+	if got.State != jobstatus.StateQueued {
+		t.Fatalf("State = %q, want queued（作り直しの投入が捨てられている）", got.State)
+	}
+	// 作り直しでも投入時刻・試行回数・題目の引き継ぎはそのまま働く。
+	if got.Attempts != 1 || got.Title != "前回の成果" {
+		t.Errorf("Attempts = %d, Title = %q（引き継ぎが働いていない）", got.Attempts, got.Title)
+	}
+}
+
+// Begin は打ち切りの判定と running の記録を 1 回の読み取りで行うこと。
+func TestBeginRecordsAndReadsOnce(t *testing.T) {
+	t.Parallel()
+
+	queuedAt := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	store := newFakeStore()
+	store.saved[testJobID] = appStatus{
+		JobID: testJobID, State: jobstatus.StateQueued, Attempts: 1, QueuedAt: queuedAt,
+	}
+
+	rec := jobstatus.NewRecorder(store)
+	done, err := rec.Begin(context.Background(), testJobID, appStatus{
+		JobID: testJobID, State: jobstatus.StateRunning,
+	}, func(next, _ *appStatus) {
+		next.Attempts++
+	})
+	if err != nil {
+		t.Fatalf("Begin() error = %v, want nil", err)
+	}
+	if done {
+		t.Error("Begin() = true, want false（未完了のジョブ）")
+	}
+
+	got := store.saved[testJobID]
+	if got.State != jobstatus.StateRunning {
+		t.Errorf("State = %q, want running", got.State)
+	}
+	if got.Attempts != 2 || !got.QueuedAt.Equal(queuedAt) {
+		t.Errorf("Attempts = %d, QueuedAt = %v（引き継ぎが働いていない）", got.Attempts, got.QueuedAt)
+	}
+	// AlreadySucceeded + Record は同じ status.json を 2 度読んでいた。
+	if store.getCount != 1 {
+		t.Errorf("Get 回数 = %d, want 1", store.getCount)
+	}
+}
+
+// 完了済みなら true を返し、記録は行わないこと。
+func TestBeginSkipsFinishedJob(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore()
+	store.saved[testJobID] = appStatus{
+		JobID: testJobID, State: jobstatus.StateSucceeded, Title: "完了済み",
+	}
+
+	rec := jobstatus.NewRecorder(store)
+	done, err := rec.Begin(context.Background(), testJobID, appStatus{
+		JobID: testJobID, State: jobstatus.StateRunning,
+	})
+	if err != nil {
+		t.Fatalf("Begin() error = %v, want nil", err)
+	}
+	if !done {
+		t.Fatal("Begin() = false, want true（完了済み）")
+	}
+	if got := store.saved[testJobID].State; got != jobstatus.StateSucceeded {
+		t.Errorf("State = %q, want succeeded（記録してはいけない）", got)
+	}
+}
+
+// 未記録は「完了していない」として続行し、初回の記録を行うこと。
+func TestBeginWhenNotRecorded(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore()
+	rec := jobstatus.NewRecorder(store)
+
+	done, err := rec.Begin(context.Background(), testJobID, appStatus{
+		JobID: testJobID, State: jobstatus.StateRunning,
+	})
+	if err != nil {
+		t.Fatalf("Begin() error = %v, want nil（未記録は正常）", err)
+	}
+	if done {
+		t.Error("Begin() = true, want false")
+	}
+	if got := store.saved[testJobID].State; got != jobstatus.StateRunning {
+		t.Errorf("State = %q, want running", got)
+	}
+}
+
+// 状態を読めなかった場合はエラーを返し、記録も行わないこと。
+// 呼び出し側はそのまま再配信へ委ねるので、引き継ぎ元を失った running を
+// 書き残す意味がない。
+func TestBeginOnReadFailure(t *testing.T) {
+	t.Parallel()
+
+	store := newFakeStore()
+	store.getErr = fmt.Errorf("%w: storage down", jobstatus.ErrUnavailable)
+
+	rec := jobstatus.NewRecorder(store)
+	done, err := rec.Begin(context.Background(), testJobID, appStatus{
+		JobID: testJobID, State: jobstatus.StateRunning,
+	})
+	if !errors.Is(err, jobstatus.ErrUnavailable) {
+		t.Fatalf("Begin() error = %v, want wrapping ErrUnavailable", err)
+	}
+	if done {
+		t.Error("Begin() = true, want false")
+	}
+	if _, ok := store.saved[testJobID]; ok {
+		t.Error("読めなかったのに記録されている")
+	}
+}
+
+// 記録先が未設定でも呼び出せ、続行できること。
+func TestBeginWithoutStore(t *testing.T) {
+	t.Parallel()
+
+	rec := jobstatus.NewRecorder[appStatus](nil)
+	done, err := rec.Begin(context.Background(), testJobID, appStatus{})
+	if err != nil {
+		t.Fatalf("Begin() error = %v, want nil", err)
+	}
+	if done {
+		t.Error("Begin() = true, want false")
+	}
+}
