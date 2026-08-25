@@ -126,7 +126,7 @@ func TestIDListExpires(t *testing.T) {
 		if _, err := list.Load(context.Background(), testPrefix, collect); err != nil {
 			t.Fatalf("Load() error = %v", err)
 		}
-		time.Sleep(60 * time.Millisecond)
+		synctest.Sleep(60 * time.Millisecond)
 		if _, err := list.Load(context.Background(), testPrefix, collect); err != nil {
 			t.Fatalf("Load() error = %v", err)
 		}
