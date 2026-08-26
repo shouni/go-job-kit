@@ -1,3 +1,4 @@
+# CI の実体は shouni/workflows。ジョブ構成とタグ運用の理由はそちらの README にある。
 name: CI
 
 on:
@@ -14,55 +15,5 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Build, Vet & Test
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Gofmt check
-        run: test -z "$(gofmt -l .)"
-
-      # -shuffle=on はテスト間の暗黙の実行順序依存を検出します。
-      - name: Test
-        run: go test -shuffle=on ./... -race -cover
-
-  lint:
-    name: golangci-lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.13.1
-
-  vulncheck:
-    name: govulncheck
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: golang/govulncheck-action@v1
-        with:
-          go-version-file: go.mod
-          repo-checkout: false
+  ci:
+    uses: shouni/workflows/.github/workflows/go-ci.yml@v1
