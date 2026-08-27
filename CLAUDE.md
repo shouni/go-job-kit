@@ -4,11 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-All four packages (`paging`, `jobstatus`, `cache`, `joblist`) are implemented and tested,
-released through v1.1.2, and consumed by four apps — `ap-comp`, `ap-mv`, `ap-story` and
-`ap-voice`, all pinned to v1.1.2. (`ap-story` is the comic app: it started life as `ap-comic`
-and was rebuilt under the new name with fresh git history, so `ap-comic` commit hashes resolve
-only in the retired GitHub repository, not in any local checkout.)
+All four packages (`paging`, `jobstatus`, `cache`, `joblist`) are implemented and tested. Who consumes
+them, and at which version, is a question for the sibling `go.mod`s rather than for this file — a list
+written here goes stale on the next app, and some of those repos are private:
+
+    grep -l "shouni/go-job-kit" ~/GolandProjects/*/go.mod
+
+(`ap-story` is the comic app: it started life as `ap-comic` and was rebuilt under the new name with fresh
+git history, so `ap-comic` commit hashes resolve only in the retired GitHub repository, not in any local
+checkout.)
 
 **Every exported entry point has real callers** — the original three apps use all of
 `jobstatus.Store`, `jobstatus.Recorder`, `joblist.Collect`, `paging.SelectIDs`,
