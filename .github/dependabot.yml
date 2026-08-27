@@ -1,22 +1,9 @@
+# 各設定の理由は shouni/workflows の README「Dependabot の規約」にある。
 version: 2
 
 updates:
-  # Go モジュールの更新。
-  # 全依存を 1 グループにまとめ、1 本の PR に収めます。個別に PR を立てると
-  # 直接依存の多いリポジトリで大量に積み上がるうえ、相互に整合が必要な依存
-  # （cloud.google.com/go 系など）が別々の PR に割れてしまうためです。
-  #
-  # 毎日確認するのは、内部ライブラリ（github.com/shouni/*）にタグを打った翌日には
-  # 依存側へ PR が届くようにするためです。バージョンが枝分かれしたまま放置される
-  # のを防ぎます。グループ化しているため、既存の PR は作り直されず更新されます。
   - package-ecosystem: gomod
     directory: /
-    # 定常更新の PR は develop 宛にします。依存更新も他の変更と同じ経路
-    # （develop → main）を通り、main を検証済みの状態に保てます。
-    #
-    # なお、この指定が効くのは定常更新だけです。脆弱性の修正 PR は
-    # target-branch に関わらず常にデフォルトブランチ（main）宛に作られます。
-    # 緊急対応を develop の進行状況から切り離すための GitHub 側の仕様です。
     target-branch: develop
     schedule:
       interval: daily
@@ -28,7 +15,6 @@ updates:
         patterns:
           - "*"
 
-  # CI で使用する GitHub Actions のバージョン更新。
   - package-ecosystem: github-actions
     directory: /
     target-branch: develop
