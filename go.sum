@@ -104,8 +104,8 @@ github.com/ryszard/goskiplist v0.0.0-20150312221310-2dfbae5fcf46 h1:GHRpF1pTW19a
 github.com/ryszard/goskiplist v0.0.0-20150312221310-2dfbae5fcf46/go.mod h1:uAQ5PCi+MFsC7HjREoAz1BU+Mq60+05gifQSsHSDG/8=
 github.com/shouni/go-remote-io v1.11.0 h1:DECXbwTYi32r3TiqMNe6IQ8/UOEe5Twv2CRFbrTziSs=
 github.com/shouni/go-remote-io v1.11.0/go.mod h1:jUxjW7lUcbClHHdjHutvpRjrHfw26Fs+yuf4UwSGzbA=
-github.com/shouni/go-utils v1.7.0 h1:wAsJm6tvzJ5DoIkqrSePr1ATqlwmP9p6CjkF7sOcP24=
-github.com/shouni/go-utils v1.7.0/go.mod h1:z35gD3jCEREuezx2ZnVk44XbJoN0GF35OACYlbrxcAc=
+github.com/shouni/go-utils v1.7.1 h1:CrwvhR59Bef2DqJqdpniyW/rJFMip1RzXCKJlE5Ge+o=
+github.com/shouni/go-utils v1.7.1/go.mod h1:z35gD3jCEREuezx2ZnVk44XbJoN0GF35OACYlbrxcAc=
 github.com/spiffe/go-spiffe/v2 v2.8.1 h1:eXZMLsu+3MLEPJyGJkolqtVrteZfQdUpOWj6LTiDl/E=
 github.com/spiffe/go-spiffe/v2 v2.8.1/go.mod h1:47Q0Q9/AqGha8QLHp+kxpH4Wca7X7EnOtlIJy3mxZ3U=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
