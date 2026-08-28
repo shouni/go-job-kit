@@ -77,9 +77,9 @@ Go は埋め込み構造体を JSON でフラットに展開するため、保�
 ### 2. Store で読み書きする
 
 ```go
-// reader / writer には remoteio.InputReader / remoteio.OutputWriter をそのまま渡せます。
+// storage には remoteio.Store をそのまま渡せます。
 store := jobstatus.NewStore[JobStatus](
-    reader, writer,
+    storage,
     jobstatus.UnderJobDir("gs://"+bucket+"/jobs"), // → .../jobs/{jobID}/status.json
 )
 
@@ -111,7 +111,7 @@ case err != nil:
 
 ```go
 locate := func(jobID string) (string, error) {
-    return remoteio.BuildGCSURI(bucket, layout.JobStatusPath(jobID)), nil
+    return remoteio.BuildURI(remoteio.SchemeGCS, bucket, layout.JobStatusPath(jobID)), nil
 }
 ```
 
@@ -199,7 +199,7 @@ type StatusStore[T any] interface {
 
 ```go
 jobIDs, err := jobIDCache.Load(ctx, prefix, func(ctx context.Context) ([]string, error) {
-    return joblist.Collect(ctx, reader, prefix) // reader には remoteio.InputReader をそのまま渡せます
+    return joblist.Collect(ctx, storage, prefix) // storage には remoteio.Store をそのまま渡せます
 })
 ```
 
