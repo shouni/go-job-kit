@@ -13,12 +13,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"path"
 	"strings"
 
 	"github.com/shouni/go-remote-io/remoteio"
 	"github.com/shouni/go-utils/jobid"
 )
+
+// Lister は Collect が必要とする一覧機能だけを表します。
+// remoteio.Store がそのまま満たします。
+//
+// remoteio 側の複合インターフェースを直接受け取らないのは、このパッケージが
+// 5 つのアプリから参照されるハブで、必要以上の操作を要求すると
+// 呼び出し側のテストが使いもしない実装まで用意することになるためです。
+type Lister interface {
+	List(ctx context.Context, name string, opts ...remoteio.ListOption) iter.Seq2[remoteio.Entry, error]
+}
 
 type options struct {
 	keeps []func(jobID string) bool
@@ -64,7 +75,7 @@ func WithValidIDsOnly() Option {
 //
 // prefix の末尾に "/" が無ければ補います。補わないと "…/music" の走査が
 // "…/music2/" 配下まで拾ってしまいます。
-func Collect(ctx context.Context, reader remoteio.Lister, prefix string, opts ...Option) ([]string, error) {
+func Collect(ctx context.Context, reader Lister, prefix string, opts ...Option) ([]string, error) {
 	if reader == nil {
 		return nil, errors.New("joblist: reader is not configured")
 	}
@@ -81,27 +92,39 @@ func Collect(ctx context.Context, reader remoteio.Lister, prefix string, opts ..
 
 	seen := map[string]bool{}
 	var jobIDs []string
-	err := reader.List(ctx, prefix, func(objectPath string) error {
+	for entry, err := range reader.List(ctx, prefix, remoteio.WithDelimiter("/")) {
+		if err != nil {
+			return nil, fmt.Errorf("joblist: list (%s): %w", prefix, err)
+		}
+
 		// 疑似ディレクトリだけを拾います。プレフィックス直下に置かれた
 		// オブジェクトはジョブではないため対象外です。
-		if !strings.HasSuffix(objectPath, "/") {
-			return nil
+		//
+		// 以前は末尾が "/" かどうかで判定していました。ストレージ側は
+		// 「これは畳まれた階層だ」と知っているのに、文字列に潰されて
+		// 呼び出し側が推測し直す形になっていたためです。
+		if !entry.IsPrefix {
+			continue
 		}
-		id := path.Base(strings.TrimSuffix(objectPath, "/"))
+		id := path.Base(strings.TrimSuffix(entry.Name, "/"))
 		if id == "" || id == "." || id == "/" || seen[id] {
-			return nil
+			continue
 		}
-		for _, keep := range cfg.keeps {
-			if !keep(id) {
-				return nil
-			}
+		if !keepAll(cfg.keeps, id) {
+			continue
 		}
 		seen[id] = true
 		jobIDs = append(jobIDs, id)
-		return nil
-	}, remoteio.WithDelimiter("/"))
-	if err != nil {
-		return nil, fmt.Errorf("joblist: list (%s): %w", prefix, err)
 	}
 	return jobIDs, nil
+}
+
+// keepAll は、登録された絞り込みをすべて満たすかを返します。
+func keepAll(keeps []func(string) bool, id string) bool {
+	for _, keep := range keeps {
+		if !keep(id) {
+			return false
+		}
+	}
+	return true
 }
