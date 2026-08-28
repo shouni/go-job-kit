@@ -6,7 +6,6 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -38,7 +37,7 @@ var (
 	// 完了済みのジョブを未完了と誤認して生成をまるごとやり直します
 	// （Recorder.AlreadySucceeded を参照）。
 	//
-	// 切り分けは remoteio が返す os.ErrNotExist で行うため、追加のストレージ
+	// 切り分けは remoteio が返す remoteio.ErrNotExist で行うため、追加のストレージ
 	// 往復は要りません。
 	ErrUnavailable = errors.New("job status unavailable")
 
@@ -77,14 +76,27 @@ func UnderJobDir(baseURI string) Locator {
 	}
 }
 
+// Storage は Store が必要とする操作だけを表します。
+// remoteio.Store がそのまま満たします。
+//
+// remoteio 側の複合インターフェースを直接受け取らないのは、このパッケージが
+// 5 つのアプリから参照されるハブで、必要以上の操作を要求すると
+// 呼び出し側のテストが使いもしない実装まで用意することになるためです。
+type Storage interface {
+	remoteio.Reader
+	remoteio.Writer
+
+	// Delete は状態ファイルを削除します。不在はエラーになりません。
+	Delete(ctx context.Context, name string) error
+}
+
 // Store は、リモートストレージを裏付けとしたジョブ状態の読み書きを行います。
 //
 // 型引数 T にはアプリ固有の状態型（Status を埋め込んだ構造体）を指定します。
 type Store[T any] struct {
-	reader remoteio.Reader
-	writer remoteio.OutputWriter
-	locate Locator
-	now    func() time.Time
+	storage Storage
+	locate  Locator
+	now     func() time.Time
 }
 
 // mustNotBePointer は、型引数にポインタ型を渡す誤用を構築時に弾きます。
@@ -108,17 +120,18 @@ func mustNotBePointer[T any](fn string) {
 
 // NewStore は Store を構築します。
 //
-// reader / writer は remoteio.InputReader / remoteio.OutputWriter をそのまま渡せます。
+// storage には remoteio.Store をそのまま渡せます。以前は読み込みと書き込みを
+// 別々の引数で受けていましたが、remoteio 側で 1 つの窓口に畳まれたため
+// ここも 1 つにしています。
 //
 // 型引数にポインタ型を渡した場合は panic します（mustNotBePointer を参照）。
-func NewStore[T any](reader remoteio.Reader, writer remoteio.OutputWriter, locate Locator) *Store[T] {
+func NewStore[T any](storage Storage, locate Locator) *Store[T] {
 	mustNotBePointer[T]("NewStore")
 
 	return &Store[T]{
-		reader: reader,
-		writer: writer,
-		locate: locate,
-		now:    func() time.Time { return time.Now().UTC() },
+		storage: storage,
+		locate:  locate,
+		now:     func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -136,8 +149,8 @@ func (s *Store[T]) Save(ctx context.Context, jobID string, status T) error {
 	if err != nil {
 		return err
 	}
-	if s.writer == nil {
-		return errors.New("jobstatus: writer is not configured")
+	if s.storage == nil {
+		return errors.New("jobstatus: storage is not configured")
 	}
 
 	if stamper, ok := any(&status).(Stamper); ok {
@@ -149,7 +162,7 @@ func (s *Store[T]) Save(ctx context.Context, jobID string, status T) error {
 		return fmt.Errorf("jobstatus: marshal (%s): %w", safeJobID, err)
 	}
 
-	if err := s.writer.Write(ctx, uri, bytes.NewReader(data),
+	if err := s.storage.Write(ctx, uri, bytes.NewReader(data),
 		remoteio.WithContentType(contentType),
 		// 状態は頻繁に変わるため、CDN・ブラウザにキャッシュさせない。
 		remoteio.WithCacheControl("no-store"),
@@ -177,16 +190,16 @@ func (s *Store[T]) Get(ctx context.Context, jobID string) (T, error) {
 	if err != nil {
 		return status, err
 	}
-	if s.reader == nil {
-		return status, errors.New("jobstatus: reader is not configured")
+	if s.storage == nil {
+		return status, errors.New("jobstatus: storage is not configured")
 	}
 
-	rc, err := s.reader.Open(ctx, uri)
+	rc, err := s.storage.Open(ctx, uri)
 	if err != nil {
-		// remoteio は未存在を os.ErrNotExist に包んで返します（GCS は
+		// remoteio は未存在を remoteio.ErrNotExist に包んで返します（GCS は
 		// storage.ErrObjectNotExist、S3 は NoSuchKey、ローカルは os.Open がそのまま）。
 		// これで「記録が無い」と「あるのに読めない」を追加の往復なしに切り分けられます。
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, remoteio.ErrNotExist) {
 			return status, fmt.Errorf("%w: %s: %w", ErrNotFound, safeJobID, err)
 		}
 		// 権限不足・ストレージ障害・ネットワーク断。「無い」と誤認すると、完了済みの
@@ -214,10 +227,10 @@ func (s *Store[T]) Delete(ctx context.Context, jobID string) error {
 	if err != nil {
 		return err
 	}
-	if s.writer == nil {
+	if s.storage == nil {
 		return nil
 	}
-	if err := s.writer.Delete(ctx, uri); err != nil {
+	if err := s.storage.Delete(ctx, uri); err != nil {
 		return fmt.Errorf("jobstatus: delete (%s): %w", uri, err)
 	}
 	return nil

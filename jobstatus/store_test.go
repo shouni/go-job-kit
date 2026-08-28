@@ -1,18 +1,15 @@
 package jobstatus_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/shouni/go-remote-io/remoteio"
+	"github.com/shouni/go-remote-io/remoteio/memio"
 
 	"github.com/shouni/go-job-kit/jobstatus"
 )
@@ -30,7 +27,7 @@ type appStatus struct {
 }
 
 func newStore(store *memStore) *jobstatus.Store[appStatus] {
-	return jobstatus.NewStore[appStatus](store, store, jobstatus.UnderJobDir(testBaseURI))
+	return jobstatus.NewStore[appStatus](store, jobstatus.UnderJobDir(testBaseURI))
 }
 
 // 状態は成果物と同じジョブディレクトリ配下に置き、履歴削除（プレフィックス一括削除）で
@@ -46,7 +43,7 @@ func TestSaveWritesInsideJobDirectory(t *testing.T) {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	if _, ok := store.files[testStatusPath]; !ok {
+	if !store.has(testStatusPath) {
 		t.Fatalf("status.json が %q に書かれていない。書き込み済み: %v", testStatusPath, store.keys())
 	}
 }
@@ -106,7 +103,7 @@ func TestStoredJSONStaysFlat(t *testing.T) {
 	}
 
 	var raw map[string]any
-	if err := json.Unmarshal(store.files[testStatusPath], &raw); err != nil {
+	if err := json.Unmarshal(store.get(t, testStatusPath), &raw); err != nil {
 		t.Fatalf("保存された JSON が不正: %v", err)
 	}
 
@@ -156,7 +153,7 @@ func TestGetReturnsErrorForCorruptedJSON(t *testing.T) {
 	t.Parallel()
 
 	store := newMemStore()
-	store.files[testStatusPath] = []byte("{ broken")
+	store.seed(t, testStatusPath, []byte("{ broken"))
 
 	_, err := newStore(store).Get(context.Background(), testJobID)
 	if err == nil {
@@ -176,8 +173,8 @@ func TestGetRejectsTrailingData(t *testing.T) {
 	t.Parallel()
 
 	store := newMemStore()
-	store.files[testStatusPath] = []byte(
-		`{"job_id":"` + testJobID + `","state":"succeeded"}{"state":"running"}`)
+	store.seed(t, testStatusPath, []byte(
+		`{"job_id":"`+testJobID+`","state":"succeeded"}{"state":"running"}`))
 
 	_, err := newStore(store).Get(context.Background(), testJobID)
 	if err == nil {
@@ -197,8 +194,8 @@ func TestGetRejectsDuplicateKeys(t *testing.T) {
 	t.Parallel()
 
 	store := newMemStore()
-	store.files[testStatusPath] = []byte(
-		`{"job_id":"` + testJobID + `","state":"succeeded","state":"running"}`)
+	store.seed(t, testStatusPath, []byte(
+		`{"job_id":"`+testJobID+`","state":"succeeded","state":"running"}`))
 
 	got, err := newStore(store).Get(context.Background(), testJobID)
 	if err == nil {
@@ -224,7 +221,7 @@ func TestSaveDoesNotEscapeHTML(t *testing.T) {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	written := string(store.files[testStatusPath])
+	written := string(store.get(t, testStatusPath))
 	if strings.Contains(written, `\u0026`) || strings.Contains(written, `\u003c`) {
 		t.Errorf("& や < が \\u00XX へ逃がされている: %s", written)
 	}
@@ -233,8 +230,8 @@ func TestSaveDoesNotEscapeHTML(t *testing.T) {
 	}
 
 	// v1 が書いた既存の status.json も読めること。
-	store.files[testStatusPath] = []byte(
-		`{"job_id":"` + testJobID + `","state":"failed","title":"A \u0026 B \u003ctag\u003e"}`)
+	store.seed(t, testStatusPath, []byte(
+		`{"job_id":"`+testJobID+`","state":"failed","title":"A \u0026 B \u003ctag\u003e"}`))
 	got, err := newStore(store).Get(context.Background(), testJobID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -249,7 +246,7 @@ func TestGetBackfillsMissingJobID(t *testing.T) {
 	t.Parallel()
 
 	store := newMemStore()
-	store.files[testStatusPath] = []byte(`{"state":"succeeded"}`)
+	store.seed(t, testStatusPath, []byte(`{"state":"succeeded"}`))
 
 	got, err := newStore(store).Get(context.Background(), testJobID)
 	if err != nil {
@@ -317,7 +314,7 @@ func TestSaveOverwritesPreviousStatus(t *testing.T) {
 	}
 
 	var stored appStatus
-	if err := json.Unmarshal(store.files[testStatusPath], &stored); err != nil {
+	if err := json.Unmarshal(store.get(t, testStatusPath), &stored); err != nil {
 		t.Fatalf("保存された JSON が不正: %v", err)
 	}
 	if stored.State != jobstatus.StateSucceeded {
@@ -354,10 +351,18 @@ func TestSavePassesWriteOptions(t *testing.T) {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	// remoteio の writeConfig は非公開のため中身は検証できません。
-	// Content-Type と Cache-Control の 2 つが渡されていることだけを見ます。
-	if got := store.optCount[testStatusPath]; got != 2 {
-		t.Errorf("write options = %d, want 2 (content type, cache control)", got)
+	// 状態は頻繁に変わるため、CDN やブラウザにキャッシュさせてはいけません。
+	// 以前は「オプションが 2 つ渡された」という数だけを見ていましたが、
+	// memio が解決後の設定を返せるので中身で確かめます。
+	opts, ok := store.h.Options(testStatusPath)
+	if !ok {
+		t.Fatalf("status.json が書かれていない: %v", store.keys())
+	}
+	if opts.ContentType != "application/json; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want application/json; charset=utf-8", opts.ContentType)
+	}
+	if opts.CacheControl != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", opts.CacheControl)
 	}
 }
 
@@ -405,13 +410,13 @@ func TestSaveWithoutEmbeddedStatus(t *testing.T) {
 	}
 
 	store := newMemStore()
-	s := jobstatus.NewStore[bare](store, store, jobstatus.UnderJobDir(testBaseURI))
+	s := jobstatus.NewStore[bare](store, jobstatus.UnderJobDir(testBaseURI))
 	if err := s.Save(context.Background(), testJobID, bare{Note: "hello"}); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 
 	var raw map[string]any
-	if err := json.Unmarshal(store.files[testStatusPath], &raw); err != nil {
+	if err := json.Unmarshal(store.get(t, testStatusPath), &raw); err != nil {
 		t.Fatalf("保存された JSON が不正: %v", err)
 	}
 	if _, ok := raw["updated_at"]; ok {
@@ -422,77 +427,71 @@ func TestSaveWithoutEmbeddedStatus(t *testing.T) {
 func TestUnderJobDirRejectsEmptyBase(t *testing.T) {
 	t.Parallel()
 
-	s := jobstatus.NewStore[appStatus](newMemStore(), newMemStore(), jobstatus.UnderJobDir("  "))
+	s := jobstatus.NewStore[appStatus](newMemStore(), jobstatus.UnderJobDir("  "))
 	if err := s.Save(context.Background(), testJobID, appStatus{}); err == nil {
 		t.Fatal("Save() error = nil, want an error for empty base URI")
 	}
 }
 
-// memStore は remoteio.Reader / remoteio.OutputWriter のインメモリ実装です。
+// memStore は memio を jobstatus のテスト向けに包んだものです。
+//
+// 以前はここに Open / Write / Delete の手書き実装があり、「未存在は os.ErrNotExist で
+// 返す」といった約束を fake 側でも書き直していました。ずれても気づけない形なので、
+// remoteio が配っている memio へ寄せています（本物と同じ適合性スイートを通ります）。
+// 残しているのは、障害を注入するための可変フィールドと検証用のヘルパーだけです。
 type memStore struct {
+	remoteio.Store
+	h *memio.Handler
+
 	// openErr は未存在以外の読み取り失敗（権限不足・障害）を再現します。
 	openErr error
 	// deleteErr は削除の失敗を再現します。
 	deleteErr error
-	mu        sync.Mutex
-	files     map[string][]byte
-	optCount  map[string]int
 }
 
 func newMemStore() *memStore {
-	return &memStore{files: map[string][]byte{}, optCount: map[string]int{}}
+	m := &memStore{}
+	m.h = memio.New(
+		memio.WithScheme(remoteio.SchemeGCS),
+		memio.WithFailure(func(op, _ string) error {
+			switch op {
+			case "open":
+				return m.openErr
+			case "delete":
+				return m.deleteErr
+			}
+			return nil
+		}),
+	)
+	m.Store = remoteio.NewStore(m.h)
+	return m
 }
 
-func (m *memStore) Open(_ context.Context, path string) (io.ReadCloser, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.openErr != nil {
-		return nil, m.openErr
+// seed は前提となる内容を書き込みます（障害注入の影響を受けません）。
+func (m *memStore) seed(t *testing.T, uri string, data []byte) {
+	t.Helper()
+	if err := m.h.Seed(uri, data); err != nil {
+		t.Fatalf("seed(%s) error = %v", uri, err)
 	}
-	data, ok := m.files[path]
-	if !ok {
-		// remoteio は未存在を os.ErrNotExist に包んで返します。fake もそれに合わせないと、
-		// 「未存在」と「読めない」を取り違えたまま通ってしまいます。
-		return nil, fmt.Errorf("オブジェクトが見つかりません (%s): %w", path, os.ErrNotExist)
-	}
-	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
-func (m *memStore) Write(_ context.Context, path string, r io.Reader, opts ...remoteio.WriteOption) error {
-	data, err := io.ReadAll(r)
+// get は保存されている内容を返します。
+func (m *memStore) get(t *testing.T, uri string) []byte {
+	t.Helper()
+	data, err := remoteio.ReadAll(context.Background(), m.Store, uri)
 	if err != nil {
-		return err
+		t.Fatalf("read(%s) error = %v", uri, err)
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.files[path] = data
-	m.optCount[path] = len(opts)
-	return nil
+	return data
 }
 
-func (m *memStore) Delete(_ context.Context, path string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.deleteErr != nil {
-		return m.deleteErr
-	}
-	delete(m.files, path)
-	return nil
+// has は対象が保存されているかを返します。
+func (m *memStore) has(uri string) bool {
+	ok, err := m.Exists(context.Background(), uri)
+	return err == nil && ok
 }
 
-func (m *memStore) keys() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	paths := make([]string, 0, len(m.files))
-	for path := range m.files {
-		paths = append(paths, path)
-	}
-	return paths
-}
+func (m *memStore) keys() []string { return m.h.URIs() }
 
 // 型引数にポインタ型を渡した場合、データを書く前に落とすこと。
 //
@@ -513,7 +512,7 @@ func TestNewStoreRejectsPointerTypeParameter(t *testing.T) {
 		}
 	}()
 
-	_ = jobstatus.NewStore[*appStatus](newMemStore(), newMemStore(), jobstatus.UnderJobDir("gs://b/jobs"))
+	_ = jobstatus.NewStore[*appStatus](newMemStore(), jobstatus.UnderJobDir("gs://b/jobs"))
 }
 
 // 埋め込みの無い型は従来どおり許容すること（打刻・引き継ぎが行われないだけ）。
@@ -523,7 +522,7 @@ func TestNewStoreAllowsTypeWithoutEmbeddedStatus(t *testing.T) {
 	type bare struct {
 		Note string `json:"note"`
 	}
-	if got := jobstatus.NewStore[bare](newMemStore(), newMemStore(), jobstatus.UnderJobDir("gs://b/jobs")); got == nil {
+	if got := jobstatus.NewStore[bare](newMemStore(), jobstatus.UnderJobDir("gs://b/jobs")); got == nil {
 		t.Fatal("NewStore[bare]() = nil")
 	}
 }

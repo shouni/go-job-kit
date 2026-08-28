@@ -8,70 +8,65 @@ import (
 	"testing"
 
 	"github.com/shouni/go-remote-io/remoteio"
+	"github.com/shouni/go-remote-io/remoteio/memio"
 
 	"github.com/shouni/go-job-kit/joblist"
 )
 
-// fakeLister は remoteio.Lister のインメモリ実装です。
-// 区切り文字付きの走査が返す形（疑似ディレクトリは "/" 終わり）で paths を流します。
-type fakeLister struct {
-	paths []string
-	err   error
-	// gotPrefix は List が受け取ったプレフィックスの記録です。
-	gotPrefix string
-	// gotOptCount は List が受け取ったオプション数の記録です（区切り文字の指定を数える）。
-	gotOptCount int
-}
+const testBucket = "bucket"
 
-func (f *fakeLister) List(_ context.Context, prefix string, callback func(path string) error, opts ...remoteio.ListOption) error {
-	f.gotPrefix = prefix
-	f.gotOptCount = len(opts)
-	if f.err != nil {
-		return f.err
-	}
-	for _, p := range f.paths {
-		if err := callback(p); err != nil {
-			return err
+// newStore は、インメモリのストレージへ objects を流し込んだ Store を返します。
+//
+// 以前はここに remoteio.Lister の手書き実装があり、区切り文字による疑似ディレクトリの
+// 畳み込みまで自前で写していました。本物とずれても気づけない形だったので、
+// remoteio が配っている memio に置き換えています（本物と同じ適合性スイートを通ります）。
+func newStore(t *testing.T, objects ...string) remoteio.Store {
+	t.Helper()
+
+	h := memio.New(memio.WithScheme(remoteio.SchemeGCS))
+	for _, name := range objects {
+		if err := h.Seed(remoteio.BuildURI(remoteio.SchemeGCS, testBucket, name), []byte("x")); err != nil {
+			t.Fatalf("Seed(%s) error = %v", name, err)
 		}
 	}
-	return nil
+	return remoteio.NewStore(h)
 }
 
 // 疑似ディレクトリ名だけをジョブ ID として拾い、直下のオブジェクトと重複は除くこと。
 func TestCollectKeepsOnlyPseudoDirectories(t *testing.T) {
 	t.Parallel()
 
-	lister := &fakeLister{paths: []string{
-		"gs://bucket/jobs/job-b/",
-		"gs://bucket/jobs/readme.txt", // 直下のオブジェクトはジョブではない
-		"gs://bucket/jobs/job-a/",
-		"gs://bucket/jobs/job-b/", // 重複は 1 件に潰す
-	}}
+	store := newStore(t,
+		"jobs/job-a/status.json",
+		"jobs/job-b/status.json",
+		"jobs/job-b/result.mp4", // 同じジョブの成果物が複数あっても ID は 1 件
+		"jobs/readme.txt",       // 直下のオブジェクトはジョブではない
+	)
 
-	got, err := joblist.Collect(context.Background(), lister, "gs://bucket/jobs")
+	got, err := joblist.Collect(context.Background(), store, "gs://bucket/jobs")
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
-	if want := []string{"job-b", "job-a"}; !slices.Equal(got, want) {
+	if want := []string{"job-a", "job-b"}; !slices.Equal(got, want) {
 		t.Errorf("Collect() = %v, want %v", got, want)
 	}
 }
 
 // prefix の末尾に "/" を補うこと。補わないと "…/music" の走査が "…/music2/" まで拾う。
-// 区切り文字の指定（オプション 1 つ）で走査していることも確かめる。
 func TestCollectNormalizesPrefix(t *testing.T) {
 	t.Parallel()
 
-	lister := &fakeLister{}
-	if _, err := joblist.Collect(context.Background(), lister, "gs://bucket/music"); err != nil {
+	store := newStore(t,
+		"music/job-a/status.json",
+		"music2/job-b/status.json", // 隣接するプレフィックスは拾わない
+	)
+
+	got, err := joblist.Collect(context.Background(), store, "gs://bucket/music")
+	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
-
-	if lister.gotPrefix != "gs://bucket/music/" {
-		t.Errorf("List prefix = %q, want %q", lister.gotPrefix, "gs://bucket/music/")
-	}
-	if lister.gotOptCount != 1 {
-		t.Errorf("List options = %d, want 1（区切り文字の指定）", lister.gotOptCount)
+	if want := []string{"job-a"}; !slices.Equal(got, want) {
+		t.Errorf("Collect() = %v, want %v", got, want)
 	}
 }
 
@@ -80,13 +75,13 @@ func TestCollectNormalizesPrefix(t *testing.T) {
 func TestCollectWithKeep(t *testing.T) {
 	t.Parallel()
 
-	lister := &fakeLister{paths: []string{
-		"gs://bucket/jobs/mv-100/",
-		"gs://bucket/jobs/regen-keyframe-200/",
-		"gs://bucket/jobs/short-300/",
-	}}
+	store := newStore(t,
+		"jobs/mv-100/status.json",
+		"jobs/regen-keyframe-200/status.json",
+		"jobs/short-300/status.json",
+	)
 
-	got, err := joblist.Collect(context.Background(), lister, "gs://bucket/jobs/",
+	got, err := joblist.Collect(context.Background(), store, "gs://bucket/jobs/",
 		joblist.WithKeep(func(id string) bool { return !strings.HasPrefix(id, "regen-keyframe-") }),
 		joblist.WithKeep(func(id string) bool { return id != "short-300" }),
 	)
@@ -102,13 +97,13 @@ func TestCollectWithKeep(t *testing.T) {
 func TestCollectWithValidIDsOnly(t *testing.T) {
 	t.Parallel()
 
-	lister := &fakeLister{paths: []string{
-		"gs://bucket/jobs/comp-20260816-abcd/",
-		"gs://bucket/jobs/-leading-hyphen/", // 先頭が英数字でない ID は不正
-		"gs://bucket/jobs/日本語/",             // 使用可能な文字の外
-	}}
+	store := newStore(t,
+		"jobs/comp-20260816-abcd/status.json",
+		"jobs/-leading-hyphen/status.json", // 先頭が英数字でない ID は不正
+		"jobs/日本語/status.json",             // 使用可能な文字の外
+	)
 
-	got, err := joblist.Collect(context.Background(), lister, "gs://bucket/jobs/", joblist.WithValidIDsOnly())
+	got, err := joblist.Collect(context.Background(), store, "gs://bucket/jobs/", joblist.WithValidIDsOnly())
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
@@ -122,9 +117,17 @@ func TestCollectWrapsListError(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("list failed")
-	lister := &fakeLister{err: wantErr}
+	h := memio.New(
+		memio.WithScheme(remoteio.SchemeGCS),
+		memio.WithFailure(func(op, _ string) error {
+			if op == "list" {
+				return wantErr
+			}
+			return nil
+		}),
+	)
 
-	_, err := joblist.Collect(context.Background(), lister, "gs://bucket/jobs/")
+	_, err := joblist.Collect(context.Background(), remoteio.NewStore(h), "gs://bucket/jobs/")
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Collect() error = %v, want wrapping %v", err, wantErr)
 	}
@@ -140,7 +143,7 @@ func TestCollectRejectsMissingConfiguration(t *testing.T) {
 	if _, err := joblist.Collect(context.Background(), nil, "gs://bucket/jobs/"); err == nil {
 		t.Error("Collect(nil reader) error = nil, want an error")
 	}
-	if _, err := joblist.Collect(context.Background(), &fakeLister{}, "  "); err == nil {
+	if _, err := joblist.Collect(context.Background(), newStore(t), "  "); err == nil {
 		t.Error("Collect(empty prefix) error = nil, want an error")
 	}
 }
