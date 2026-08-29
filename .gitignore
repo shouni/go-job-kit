@@ -1,32 +1,46 @@
-# JetBrains IDEs
-.idea/
-*.iml
-*.iws
-*.ipr
-
-# macOS
-.DS_Store
-
-# Go build artifacts
+# Binaries for programs and plugins
 *.exe
+*.exe~
 *.dll
 *.so
-*.o
-*.a
-/bin/
-/.gocache/
-/.cache/
+*.dylib
 
-# Environment files
-# Ignore all .env files but keep templates
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+*.prof
+
+# Go workspace file
+go.work
+go.work.sum
+
+# ローカルのビルド成果物とキャッシュ
+/bin/
+/.cache/
+/.gocache/
+
+# env file
 .env
 .env.*
-!.env.example
-!.env.sample
 
-# VSCode editor
+# 秘密情報（実在しなくても、置かれたら commit してはいけないもの）
+credentials.json
+*.key
+*.pem
+
+# Claude Code のローカル設定
+.claude/settings.local.json
+
+# エディタ / OS（マシンをまたぐためリポジトリ側に持つ）
+.DS_Store
+.idea/
 .vscode/
-
-# Go test coverage
-/coverage.out
-/coverage.html
+*.iml
+*.ipr
+*.iws
+*.code-workspace
