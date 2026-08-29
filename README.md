@@ -2,11 +2,13 @@
 
 [![CI](https://github.com/shouni/go-job-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/shouni/go-job-kit/actions/workflows/ci.yml)
 [![Status](https://img.shields.io/badge/Status-Active-brightgreen)](#)
-[![Language](https://img.shields.io/badge/Language-Go-blue)](https://golang.org/)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/shouni/go-job-kit)](https://golang.org/)
+[![Language](https://img.shields.io/badge/Language-Go-blue)](https://go.dev/)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/shouni/go-job-kit)](https://go.dev/)
 [![GitHub tag (latest by date)](https://img.shields.io/github/v/tag/shouni/go-job-kit)](https://github.com/shouni/go-job-kit/tags)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Reference](https://pkg.go.dev/badge/github.com/shouni/go-job-kit.svg)](https://pkg.go.dev/github.com/shouni/go-job-kit)
+
+## 🚀 概要 (About) - 投入・記録・一覧。成果物のドメインには踏み込まない
 
 **Cloud Tasks へ投入し、GCS へ成果物を書き出す非同期ジョブ**を扱うサービス向けの共通基盤です。
 
