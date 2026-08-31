@@ -128,7 +128,7 @@ func (r *Recorder[T]) AlreadySucceeded(ctx context.Context, jobID string) (bool,
 
 // Record は、前回の記録から共通フィールドを引き継いだうえで status を保存します。
 //
-// 引き継ぐのは Attempts・QueuedAt と、status 側が空のときの Title です
+// 引き継ぐのは Attempts・QueuedAt と、status 側が空のときの Title・Command です
 // （CarryOver を参照）。ワーカーは毎回タスクから状態を組み立て直すため、これが
 // 無いと再試行のたびに試行回数と投入時刻が失われます。
 //

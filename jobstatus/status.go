@@ -43,7 +43,11 @@ type Status struct {
 	// Error は State が failed のときの失敗理由です。
 	Error string `json:"error,omitempty"`
 	// Attempts はワーカーが処理を開始した回数です。2 以上なら再試行されています。
-	Attempts  int       `json:"attempts,omitempty"`
+	//
+	// omitempty ではなく omitzero なのは、Store が encoding/json/v2 で書くためです。
+	// v2 の omitempty は数値の 0 を空とみなさないので、omitempty のままだと
+	// まだ動き出していないジョブの status.json に attempts:0 が残ります。
+	Attempts  int       `json:"attempts,omitzero"`
 	QueuedAt  time.Time `json:"queued_at,omitzero"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -73,9 +77,9 @@ func (s Status) Common() Status {
 // CarryOver は、前回の記録から引き継ぐべき共通フィールドを取り込みます。
 //
 // ワーカーは状態が変わるたびにタスクから状態を組み立て直すため、これが無いと
-// 再試行のたびに試行回数と投入時刻が失われます。Title は、今回の組み立てで
-// 埋まっていない場合にだけ引き継ぎます（生成の途中で題目が確定するサービスが
-// あるため、新しく判明した題目を古い値で上書きしないようにするためです）。
+// 再試行のたびに試行回数と投入時刻が失われます。Title と Command は、今回の
+// 組み立てで埋まっていない場合にだけ引き継ぎます（生成の途中で題目が確定する
+// サービスがあるため、新しく判明した題目を古い値で上書きしないようにするためです）。
 //
 // State・Error・UpdatedAt は引き継ぎません。いずれも「今回の記録」を表す値で、
 // 引き継ぐと成功後に古い失敗理由が残り続けます。
