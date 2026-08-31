@@ -14,27 +14,37 @@ written here goes stale on the next app, and some of those repos are private:
 git history, so `ap-comic` commit hashes resolve only in the retired GitHub repository, not in any local
 checkout.)
 
-**Every exported entry point has real callers** — the original three apps use all of
-`jobstatus.Store`, `jobstatus.Recorder`, `joblist.Collect`, `paging.SelectIDs`,
-`paging.LoadPage`, `cache.TTL`, `cache.IDList`; `ap-voice` uses the `jobstatus` and `paging`
-halves. Nothing here is speculative, which is worth keeping true: an API with no caller cannot
-tell you whether its shape is right.
+**Three of the five consumers left at the end of 2026-08.** They moved job status to Cloud
+Firestore (`go-job-firestore`) and dropped this module from their `go.mod` outright. The reason
+generalizes: `joblist`, `paging` and `cache` exist to make object-storage listing bearable, and a
+query backend is exactly what makes that machinery unnecessary. Expect the same argument from the
+next app whose history list grows a filter — the question to ask it is whether the listing is
+actually expensive, measured, not whether Firestore is nicer.
 
-`joblist` (added after v1.0.5, shipped in the v1.1.x line) was the newest extraction:
-`ap-comp` (`repository/history_query.go`), `ap-mv` and `ap-story`
-(`repository/history_listing.go`) each carried the same pseudo-directory scanner — delimiter
-listing, keep only "/"-suffixed entries, `path.Base`, dedup — differing only in per-app
-filters, which became `WithKeep` / `WithValidIDsOnly`. All three have since migrated and now
-call `joblist.Collect`. `ap-voice` is the deliberate exception: its listing walks every object
-*without* a delimiter because one pass also derives per-job `HasAudio`, so it has no scanner
-to replace.
+**Every exported entry point still has a caller**, which is worth keeping true: an API with no
+caller cannot tell you whether its shape is right. As of 2026-08-31, both remaining consumers use
+`jobstatus.Store`, `jobstatus.Recorder`, `paging.LoadPage`, `paging.PageMeta` and `cache.IDList`;
+`cache.TTL` and `joblist.Collect` have one caller each. `paging.SelectIDs` has no direct caller
+any more — it is reached through `LoadPage` (`paging/load.go:73`), so it is exercised rather than
+dead, but it is no longer shaped by anyone. Re-run the grep above before trusting this paragraph.
 
-**The API is load-bearing.** A breaking change here means a migration in four services, so
-prefer adding to the surface over reshaping it; reshape only when the current shape is what
-makes callers get it wrong (`paging`'s sort key is the one case so far), and land the apps in
-the same round. Two constraints cannot be relaxed at all without touching stored data:
-`jobstatus.Status` is embedded by the consumers so its JSON stays flat (see below), and
-`paging.PageMeta`'s tags are what their HTTP responses already return.
+`joblist` (added after v1.0.5, shipped in the v1.1.x line) was the newest extraction: three apps
+each carried the same pseudo-directory scanner — delimiter listing, keep only "/"-suffixed
+entries, `path.Base`, dedup — differing only in per-app filters, which became `WithKeep` /
+`WithValidIDsOnly`.
+
+**The scanner has since been written by hand again.** `adk-review`'s `listJobIDs`
+(`internal/repository/history.go`) runs that loop inline inside its `cache.IDList` load instead of
+calling `joblist.Collect`. Before treating it as an oversight, check whether it needs something
+`WithKeep` cannot express — but as it stands it is the duplication this package was extracted to
+remove, reappearing in the one app that started (2026-08-18) after the extraction (2026-08-16).
+
+**The API is load-bearing.** A breaking change here means a migration in the two services that
+still depend on it, so prefer adding to the surface over reshaping it; reshape only when the
+current shape is what makes callers get it wrong (`paging`'s sort key is the one case so far),
+and land the apps in the same round. Two constraints cannot be relaxed at all without touching
+stored data: `jobstatus.Status` is embedded by the consumers so its JSON stays flat (see below),
+and `paging.PageMeta`'s tags are what their HTTP responses already return.
 
 ## Commands
 
@@ -122,10 +132,13 @@ cache, concurrent page load — has all moved here (`jobstatus.Recorder`, `cache
   value return). Each app briefly carried a 12-line adapter to bridge the two; writing it three
   times was the argument for moving the port instead. `*jobstatus.Store[T]` now satisfies the
   port directly, so none of them wraps it any more. Keep the shapes aligned — a divergence here
-  reintroduces three adapters, not one.
-- **`ap-comp`'s success record now inherits `Title`.** It used to carry `Attempts`/`QueuedAt` but
-  not `Title`; `CarryOver`'s fill-when-empty rule means a success recorded without one picks up
-  the running record's. Judged an improvement (the title settles mid-generation), not reverted.
+  reintroduces an adapter in every consumer, not one.
+- **`CarryOver` fills `Title` and `Command` when this record leaves them empty.** The rule arrived
+  with `ap-comp`, whose success record used to carry `Attempts`/`QueuedAt` but not `Title`, so a
+  success recorded without one picked up the running record's — judged an improvement, since the
+  title settles mid-generation. `Command` follows the same rule. Both are pinned by
+  `TestCarryOverFillsOnlyEmptyTitleAndCommand`; they went untested long enough for the doc comment
+  to drift away from the code.
 
 ## Architecture
 
@@ -142,9 +155,16 @@ Design constraints that are not visible from any single file:
   construction — so callers cannot forget it.
 - **Existing `status.json` objects in GCS must stay readable.** The apps' current structs serialize
   flat: `job_id`, `command`, `state`, `title`, `error`, `attempts`, `queued_at`, `updated_at`, plus
-  app-specific fields (`storage_uri` / `recipe_storage_uri` in ap-comp, `output_dir` in ap-story).
-  The intended approach is for apps to embed `jobstatus.Status` in their own struct, since Go
-  flattens embedded structs in JSON. Do not introduce a nested payload field.
+  app-specific fields (`output_dir` in `ap-story`, `metrics` and friends in `adk-review`). The
+  intended approach is for apps to embed `jobstatus.Status` in their own struct, since Go flattens
+  embedded structs in JSON. Do not introduce a nested payload field.
+- **Tag numbers and bools `omitzero`, never `omitempty`.** `Store` writes through
+  `encoding/json/v2` (see below), where `omitempty` means "encodes to an empty JSON value" — and
+  `0` and `false` are not empty, so `omitempty` keeps them. `Status.Attempts` carried exactly that
+  bug until 2026-08-31, writing `attempts:0` into the record of every job that had not started
+  yet. The rule reaches the embedding apps' own fields too: `adk-review` still writes
+  `"truncated":false` into every record and a full row of zero `metrics` whenever any one metric
+  is set.
 - **Status records keep one generation only** — overwritten in place, written with `no-store` so
   CDN and browsers do not cache them.
 - **A missing status and an unreadable one are different errors.** `remoteio` wraps not-found
@@ -160,11 +180,13 @@ Design constraints that are not visible from any single file:
   cannot succeed.
 - **`Recorder.Record` refuses to roll a finished job back, and `queued` is exempt.** The rule
   itself is in `rolledBack`; what is invisible from here is why the exemption has to exist.
-  Same-ID resubmission is a normal flow in the apps — `ap-comp` accepts a caller-supplied
-  `job_id`, `ap-voice` re-submits from the history detail page with the same ID — and every
-  submission path writes `queued` before enqueueing. Blocking that write would leave the record
-  at `succeeded`, so the re-run guard would read the regeneration as already done and ACK the
-  task without ever running it.
+  Same-ID resubmission is a normal flow: `ap-story`'s regenerate handler takes the job ID from
+  the URL and re-enqueues under it, and every submission path writes `queued` before enqueueing.
+  (`adk-review` deliberately does the opposite — it refuses a caller-supplied `job_id`, because
+  accepting one would let the caller write artifacts to any path in the bucket — so the exemption
+  is not universal, but it only takes one such app to need it.) Blocking that write would leave
+  the record at `succeeded`, so the re-run guard would read the regeneration as already done and
+  ACK the task without ever running it.
 - **`status.json` goes through `encoding/json/v2`, not `json.Decoder`.** The reason is the
   bullet above, reached from the read side: the v1 decoder took the last of duplicate keys, so a
   half-written record followed by a second write decoded as the *newer* state and rolled a
@@ -182,8 +204,9 @@ Pin the shouni modules to the versions the consuming apps already use, so adopti
 library does not force an upgrade elsewhere. Check the apps' `go.mod` before bumping here; the
 kit lagging behind them is harmless (MVS resolves upward), but running ahead forces upgrades.
 
-The kit is currently **ahead**: it needs `go-remote-io v1.10.1` and `go-utils v1.7.0`, while
-all four apps still pin `go-remote-io v1.9.0` and `go-utils v1.6.1`. That is deliberate —
+As of 2026-08-31 nothing is ahead: the kit and both consumers sit on `go-remote-io v1.11.0` and
+`go-utils v1.7.1`, so the next tag drags nobody forward. That is a snapshot, not a rule — read the
+`go.mod`s rather than this line. The kit has been ahead before, deliberately:
 `jobstatus.ErrInvalidJobID` wraps the `jobid.ErrEmpty` / `ErrTooLong` / `ErrInvalidFormat`
-sentinels that only exist from `go-utils v1.7.0` — but it means the next tag drags all four
-apps forward. Bump them in the same round rather than letting MVS do it silently.
+sentinels that only exist from `go-utils v1.7.0`. When that happens, bump the apps in the same
+round rather than letting MVS do it silently.
