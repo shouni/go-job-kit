@@ -33,11 +33,12 @@ each carried the same pseudo-directory scanner — delimiter listing, keep only 
 entries, `path.Base`, dedup — differing only in per-app filters, which became `WithKeep` /
 `WithValidIDsOnly`.
 
-**The scanner has since been written by hand again.** `adk-review`'s `listJobIDs`
-(`internal/repository/history.go`) runs that loop inline inside its `cache.IDList` load instead of
-calling `joblist.Collect`. Before treating it as an oversight, check whether it needs something
-`WithKeep` cannot express — but as it stands it is the duplication this package was extracted to
-remove, reappearing in the one app that started (2026-08-18) after the extraction (2026-08-16).
+**The scanner got written by hand once more before that stuck.** `adk-review` started
+(2026-08-18) just after the extraction (2026-08-16) and still ran the loop inline in its
+`listJobIDs`, losing the extras `Collect` had accumulated — duplicate IDs, a prefix without a
+trailing slash, the "." and "/" degenerate names. It now calls `Collect` (`adk-review 6d5646c`).
+Worth knowing when the next app arrives: the scan is small enough to look like something you would
+just write, so an extraction alone does not stop it coming back.
 
 **The API is load-bearing.** A breaking change here means a migration in the two services that
 still depend on it, so prefer adding to the surface over reshaping it; reshape only when the
