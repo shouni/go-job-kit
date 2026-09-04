@@ -196,6 +196,12 @@ Design constraints that are not visible from any single file:
 - **No app domain types.** Music, video, and comic result types stay in their own repositories.
   This library handles state and IDs. Auth, HTTP, and notification concerns belong to `gcp-kit`,
   `go-http-kit`, and `go-notify` respectively.
+- **"Job management" is a name that would accept anything, so admission has a bar.** A candidate
+  has to be called by two or more services (a single-service helper stays in that service's
+  `internal/`), carry no service-specific domain, and sit on the job lifecycle. The middle rule is
+  the one above; the first is why `joblist` waited for the third hand-written copy of the scanner.
+  This bar used to be a 収録基準 section in the README, where it addressed readers who are not the
+  ones it constrains.
 
 ## Dependencies
 
