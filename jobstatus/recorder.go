@@ -11,6 +11,10 @@ import (
 //
 // Recorder が Store 型ではなくインターフェースを受けるのは、利用側が状態の保存先を
 // 差し替えられるようにするためです（テストの偽実装や、ストレージ以外への記録）。
+//
+// アプリ側で状態保存の port を定義する場合も、この形に揃えておくことを勧めます。
+// 揃えておけば *Store[T] がそのまま port の実装になります。揃えなかった場合に必要なのは
+// 薄いアダプタ 1 つですが、利用側が増えるとその数だけ同じものが増えます。
 type StatusStore[T any] interface {
 	Get(ctx context.Context, jobID string) (T, error)
 	Save(ctx context.Context, jobID string, status T) error
