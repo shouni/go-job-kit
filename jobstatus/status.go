@@ -34,6 +34,23 @@ const (
 //	    jobstatus.Status
 //	    OutputDir string `json:"output_dir,omitempty"`
 //	}
+//
+// 保存される status.json はフラットな形になります。埋め込みをやめると、この形で
+// 保存済みの状態ファイルが読めなくなります。
+//
+//	{
+//	  "job_id": "c20260726-120000-abcd1234",
+//	  "command": "generate",
+//	  "state": "running",
+//	  "title": "作品名",
+//	  "attempts": 2,
+//	  "queued_at": "2026-07-26T12:00:00Z",
+//	  "updated_at": "2026-07-26T12:00:31Z",
+//	  "output_dir": "gs://bucket/jobs/c20260726-120000-abcd1234"
+//	}
+//
+// このため、入れ子のペイロード（共通フィールドを別のオブジェクトへまとめる形）は
+// 導入しないでください。
 type Status struct {
 	JobID   string `json:"job_id"`
 	Command string `json:"command,omitempty"`

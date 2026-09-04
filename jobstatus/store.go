@@ -141,6 +141,9 @@ func NewStore[T any](storage Storage, locate Locator) *Store[T] {
 // status が Status を埋め込んでいれば、JobID と UpdatedAt はここで打刻されます
 // （引数の値は変更しません）。
 //
+// 書き込みには Cache-Control: no-store を付けます。状態は頻繁に変わるため、CDN や
+// ブラウザにキャッシュさせると古い状態を返し続けることになるためです。
+//
 // エンコードは Get と揃えて encoding/json/v2 を使います。v1 と違い &・<・> を
 // \u00XX へ逃がさないため、題目や失敗理由を含む status.json がそのまま読めます
 // （JSON としては同値で、フィールドの並びも埋め込みの展開も v1 と一致します）。

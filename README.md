@@ -70,24 +70,11 @@ err := store.Save(ctx, jobID, JobStatus{State: jobstatus.StateQueued, Command: "
 ## 🧭 記録の罠 (Recording)
 
 **埋め込みをやめると保存済みの `status.json` が読めなくなります。** Go は埋め込み構造体を JSON で
-フラットに展開するので、上の `JobStatus` は次の形で保存されます。既存の状態ファイルをそのまま
-読み書きできるのはこのためで、**入れ子のペイロードを導入しないでください。**
+フラットに展開するので、`Status` を埋め込んだ型はフラットな 1 段の JSON として保存されます
+（形は `jobstatus.Status` の godoc にあります）。既存の状態ファイルをそのまま読み書きできるのは
+このためで、**入れ子のペイロードを導入しないでください。**
 
-```json
-{
-  "job_id": "c20260726-120000-abcd1234",
-  "command": "generate",
-  "state": "running",
-  "title": "作品名",
-  "attempts": 2,
-  "queued_at": "2026-07-26T12:00:00Z",
-  "updated_at": "2026-07-26T12:00:31Z",
-  "output_dir": "gs://bucket/jobs/c20260726-120000-abcd1234"
-}
-```
-
-状態ファイルは常に最新の 1 世代だけを保持し、上書きで更新します（CDN・ブラウザにキャッシュさせない
-よう `no-store` を付けて書きます）。
+状態ファイルは常に最新の 1 世代だけを保持し、上書きで更新します。
 
 **「未記録」と「あるはずなのに読めない」は別のエラーです。** `ErrNotFound` と `ErrUnavailable` を
 分けているのは、両者で取るべき判断が正反対だからです。記録が無いのは正常な状態なので先へ進んで
@@ -111,8 +98,7 @@ err := store.Save(ctx, jobID, JobStatus{State: jobstatus.StateQueued, Command: "
 害が大きいためです（読めなかったときの扱いは上のとおり別です）。
 
 **アプリ側の状態保存 port は `StatusStore[T]` の形に揃えておくことを勧めます。** 揃えておけば
-`*jobstatus.Store[T]` がそのまま port の実装になります。揃えなかった場合に必要なのは薄いアダプタ
-1 つですが、利用側が増えるとその数だけ同じものが増えます。
+`*jobstatus.Store[T]` がそのまま port の実装になり、利用側ごとに同じアダプタが増えるのを防げます。
 
 ---
 
