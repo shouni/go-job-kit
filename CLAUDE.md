@@ -15,7 +15,8 @@ git history, so `ap-comic` commit hashes resolve only in the retired GitHub repo
 checkout.)
 
 **Three of the five consumers left at the end of 2026-08.** They moved job status to Cloud
-Firestore (`go-job-firestore`) and dropped this module from their `go.mod` outright. The reason
+Firestore (`gcp-kit/jobstatus`, which was the standalone `go-job-firestore` at the time) and
+dropped this module from their `go.mod` outright. The reason
 generalizes: `joblist`, `paging` and `cache` exist to make object-storage listing bearable, and a
 query backend is exactly what makes that machinery unnecessary. Expect the same argument from the
 next app whose history list grows a filter — the question to ask it is whether the listing is
