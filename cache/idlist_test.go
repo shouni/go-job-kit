@@ -89,6 +89,62 @@ func TestIDListInvalidate(t *testing.T) {
 	}
 }
 
+// 走査の途中で Invalidate されたら、その走査の結果（削除前の一覧）をキャッシュに
+// 入れないこと。入れてしまうと、削除したジョブが TTL の間一覧に残ります。
+func TestIDListInvalidateDuringScan(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		list := cache.NewIDList(time.Minute)
+		release := make(chan struct{})
+		var calls atomic.Int32
+
+		stale := func(context.Context) ([]string, error) {
+			calls.Add(1)
+			<-release
+			return []string{"job-a", "job-deleted"}, nil
+		}
+		fresh := func(context.Context) ([]string, error) {
+			calls.Add(1)
+			return []string{"job-a"}, nil
+		}
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if _, err := list.Load(context.Background(), testPrefix, stale); err != nil {
+				t.Errorf("Load() error = %v", err)
+			}
+		}()
+		synctest.Wait() // 走査が始まるまで待つ
+
+		// 走査中に削除が入った。以後の Load は進行中の走査に相乗りしない。
+		list.Invalidate(testPrefix)
+		got, err := list.Load(context.Background(), testPrefix, fresh)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if want := []string{"job-a"}; !slices.Equal(got, want) {
+			t.Errorf("Invalidate 直後の Load() = %v, want %v", got, want)
+		}
+
+		close(release)
+		<-done
+
+		// 古い走査が終わっても、新しい一覧を上書きしない。
+		got, err = list.Load(context.Background(), testPrefix, fresh)
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if want := []string{"job-a"}; !slices.Equal(got, want) {
+			t.Errorf("古い走査の完了後の Load() = %v, want %v", got, want)
+		}
+		if got := calls.Load(); got != 2 {
+			t.Errorf("collect の呼び出し回数 = %d, want 2", got)
+		}
+	})
+}
+
 // 走査に失敗した結果はキャッシュせず、次の呼び出しでやり直すこと。
 func TestIDListDoesNotCacheFailure(t *testing.T) {
 	t.Parallel()

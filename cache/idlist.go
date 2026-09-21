@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -33,6 +34,16 @@ type IDList struct {
 	// flight は、同じキーへの Load が同時にキャッシュミスしたときに
 	// 走査を 1 回にまとめます（Load を参照）。
 	flight singleflight.Group
+
+	// mu は generation の更新と、それに基づくキャッシュへの書き込みを直列にします。
+	mu sync.Mutex
+	// generation は Invalidate のたびに進みます。走査は開始時の値を覚えておき、
+	// 終わったときに変わっていたら結果をキャッシュへ入れません。走査中に削除が
+	// 入った場合、その結果は削除前の一覧だからです。
+	//
+	// キーごとに持たないのは、別のキーの Invalidate に巻き込まれても失うのが走査
+	// 1 回分のキャッシュだけで、その代わりにキーの集合を管理せずに済むためです。
+	generation uint64
 }
 
 // NewIDList はジョブ ID 一覧用のキャッシュを生成します。
@@ -82,11 +93,12 @@ func (c *IDList) Load(ctx context.Context, key string, collect func(context.Cont
 		// singleflight は同じキーの飛行中、最初の呼び出しの関数だけを実行します。
 		// つまりこの closure の ctx は、走査を実際に始めた呼び出しのものです。
 		ch := c.flight.DoChan(key, func() (any, error) {
+			started := c.currentGeneration()
 			jobIDs, err := collect(ctx)
 			if err != nil {
 				return nil, err
 			}
-			c.cache.Set(key, jobIDs, ttlcache.DefaultTTL)
+			c.store(key, jobIDs, started)
 			return jobIDs, nil
 		})
 
@@ -114,11 +126,37 @@ func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
+// currentGeneration は現在の世代を返します。
+func (c *IDList) currentGeneration() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.generation
+}
+
+// store は、走査の開始から Invalidate が挟まっていないときだけ結果を保持します。
+func (c *IDList) store(key string, jobIDs []string, started uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.generation != started {
+		return
+	}
+	c.cache.Set(key, jobIDs, ttlcache.DefaultTTL)
+}
+
 // Invalidate は一覧キャッシュを破棄し、ジョブの削除や追加を即座に反映させます。
+//
+// 走査の途中で呼ばれた場合、その走査の結果はキャッシュに入りません。また、以後の
+// Load は進行中の走査に相乗りせず、新しく走査します。すでに相乗りして待っている
+// 呼び出しは、進行中の走査の結果（Invalidate 前の一覧でありえます）を受け取ります。
 func (c *IDList) Invalidate(key string) {
 	if c == nil || c.cache == nil {
 		return
 	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.generation++
+	c.flight.Forget(key)
 	c.cache.Delete(key)
 }
 
