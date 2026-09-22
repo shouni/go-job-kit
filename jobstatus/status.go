@@ -69,18 +69,39 @@ type Status struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// IsTerminal は、これ以上状態が変化しない（ポーリングを止めてよい）かどうかを返します。
+// IsTerminal は、再実行ガード（Recorder.Begin）が「もう実行しなくてよい」と判断する
+// 状態かどうかを返します。succeeded だけが真です。
 //
-// failed は Cloud Tasks が再試行しうるため終了とはみなしません。
+// failed は Cloud Tasks が再試行しうるため、ガードの意味では終端とみなしません。
+// 「ポーリングを止めてよいか」「一覧で進行中と表示するか」の判定には使わないでください。
+// それは Finished / InFlight です（キューが max_attempts = 1 なら failed も終わりです）。
 func (s Status) IsTerminal() bool {
 	return s.State == StateSucceeded
 }
 
+// Finished は、succeeded または failed に達した（結末が出ていて、ポーリングを止めて
+// よい）かどうかを返します。IsTerminal と違い failed も含みます。
+func (s Status) Finished() bool {
+	return s.State == StateSucceeded || s.State == StateFailed
+}
+
+// InFlight は、queued または running（まだ結末が出ていない）かどうかを返します。
+func (s Status) InFlight() bool {
+	return s.State == StateQueued || s.State == StateRunning
+}
+
 // Stamp は、Store が保存時にジョブ ID と更新時刻を打刻するために呼びます。
 // 呼び出し側が UpdatedAt を設定し忘れても記録が残るようにするためのものです。
+//
+// QueuedAt が未設定なら now を入れます。一覧は queued_at の降順で並ぶため、打刻を
+// 忘れたジョブは末尾に沈みます。投入時の記録だけが失敗したジョブも、次の記録で
+// ここが埋まります（Recorder が前回の値を引き継ぐので、既にあれば上書きしません）。
 func (s *Status) Stamp(jobID string, now time.Time) {
 	s.JobID = jobID
 	s.UpdatedAt = now
+	if s.QueuedAt.IsZero() {
+		s.QueuedAt = now
+	}
 }
 
 // Common は、埋め込まれた共通フィールドをそのまま返します。

@@ -102,8 +102,8 @@ github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 h1:GFCKgm
 github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10/go.mod h1:t/avpk3KcrXxUnYOhZhMXJlSEyie6gQbtLq5NM3loB8=
 github.com/ryszard/goskiplist v0.0.0-20150312221310-2dfbae5fcf46 h1:GHRpF1pTW19a8tTFrMLUcfWwyC0pnifVo2ClaLq+hP8=
 github.com/ryszard/goskiplist v0.0.0-20150312221310-2dfbae5fcf46/go.mod h1:uAQ5PCi+MFsC7HjREoAz1BU+Mq60+05gifQSsHSDG/8=
-github.com/shouni/go-remote-io v1.11.9 h1:pzUtfMp7L4yRBJzvlDM3kv7DpGC5GyDTMfO/HUhvhVM=
-github.com/shouni/go-remote-io v1.11.9/go.mod h1:qcSUYOkJXf4qTRYF1kpV617XMQ4w8kpaPt1CGG/qAFM=
+github.com/shouni/go-remote-io v1.12.0 h1:jnrccBc3IJueggVZcpuRHQcLnq1RQ5+NdKbpU0o6978=
+github.com/shouni/go-remote-io v1.12.0/go.mod h1:qcSUYOkJXf4qTRYF1kpV617XMQ4w8kpaPt1CGG/qAFM=
 github.com/shouni/go-utils v1.8.0 h1:ya9c8Q7yfjUofEFZdStFyK53LN/hyJJqzo4+4c/6ThY=
 github.com/shouni/go-utils v1.8.0/go.mod h1:z35gD3jCEREuezx2ZnVk44XbJoN0GF35OACYlbrxcAc=
 github.com/spiffe/go-spiffe/v2 v2.8.1 h1:eXZMLsu+3MLEPJyGJkolqtVrteZfQdUpOWj6LTiDl/E=
