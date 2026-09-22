@@ -44,6 +44,40 @@ func TestStampSetsJobIDAndUpdatedAt(t *testing.T) {
 	if !status.UpdatedAt.Equal(now) {
 		t.Errorf("UpdatedAt = %v, want %v", status.UpdatedAt, now)
 	}
+	// 一覧は queued_at の降順なので、打刻を忘れたジョブは末尾に沈む。未設定なら埋める。
+	if !status.QueuedAt.Equal(now) {
+		t.Errorf("QueuedAt = %v, want %v (filled when zero)", status.QueuedAt, now)
+	}
+
+	queued := now.Add(-time.Hour)
+	status = jobstatus.Status{QueuedAt: queued}
+	status.Stamp("job-1", now)
+	if !status.QueuedAt.Equal(queued) {
+		t.Errorf("QueuedAt = %v, want the existing %v kept", status.QueuedAt, queued)
+	}
+}
+
+// IsTerminal は再実行ガード用、Finished / InFlight は表示・ポーリング用で、failed の
+// 扱いが違う（前者では終端ではなく、後者では終端）。gcp-kit の写しと同じ規則です。
+func TestStatusPredicates(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		state                        jobstatus.State
+		terminal, finished, inFlight bool
+	}{
+		{jobstatus.StateQueued, false, false, true},
+		{jobstatus.StateRunning, false, false, true},
+		{jobstatus.StateSucceeded, true, true, false},
+		{jobstatus.StateFailed, false, true, false},
+	}
+	for _, tt := range tests {
+		s := jobstatus.Status{State: tt.state}
+		if s.IsTerminal() != tt.terminal || s.Finished() != tt.finished || s.InFlight() != tt.inFlight {
+			t.Errorf("%s: IsTerminal=%v Finished=%v InFlight=%v, want %v %v %v",
+				tt.state, s.IsTerminal(), s.Finished(), s.InFlight(), tt.terminal, tt.finished, tt.inFlight)
+		}
+	}
 }
 
 func TestEnsureJobIDKeepsExistingValue(t *testing.T) {
