@@ -48,6 +48,13 @@ and land the apps in the same round. Two constraints cannot be relaxed at all wi
 stored data: `jobstatus.Status` is embedded by the consumers so its JSON stays flat (see below),
 and `paging.PageMeta`'s tags are what their HTTP responses already return.
 
+`paging.PageMeta` is an alias of `go-utils/paging.PageMeta`, and `SelectIDs` delegates the arithmetic to
+`paging.New`. The type used to be a local copy, and its edge values had drifted from the Firestore
+listing in gcp-kit/jobstatus (empty list → `total_pages` 0 here, 1 there; page 1 → `prev_page` 0 here,
+1 there) while the M2M client read both through one struct. Everything is now clamped into range and
+`TotalPages` is never below 1, so a template must test `TotalPages > 1`, not truthiness. Don't re-grow a
+local definition; the tags live in go-utils now.
+
 ## Commands
 
 ```bash

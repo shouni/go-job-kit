@@ -79,6 +79,28 @@ func TestSelectIDsEmpty(t *testing.T) {
 	}
 }
 
+// 端の値が Firestore 系の一覧（gcp-kit/jobstatus）と同じであること。
+// 両方を 1 つの型で受ける M2M クライアントがあるため、空一覧の TotalPages や
+// 1 ページ目の PrevPage が食い違うと、同じ契約の応答がサービスごとに変わります。
+func TestSelectIDsEdgeValuesMatchFirestoreListing(t *testing.T) {
+	t.Parallel()
+
+	_, empty := SelectIDs(nil, 5, 10, nil)
+	if empty.Page != 1 || empty.TotalPages != 1 || empty.HasPrev || empty.PrevPage != 1 || empty.NextPage != 1 {
+		t.Errorf("空一覧に page=5: meta = %+v, want Page 1 / TotalPages 1 / PrevPage 1 / NextPage 1", empty)
+	}
+
+	_, first := SelectIDs([]string{"c", "b", "a"}, 1, 2, nil)
+	if first.PrevPage != 1 || first.NextPage != 2 {
+		t.Errorf("1 ページ目: PrevPage %d NextPage %d, want 1 2", first.PrevPage, first.NextPage)
+	}
+
+	_, last := SelectIDs([]string{"c", "b", "a"}, 2, 2, nil)
+	if last.NextPage != 2 || last.HasNext {
+		t.Errorf("最終ページ: NextPage %d HasNext %v, want 2 false", last.NextPage, last.HasNext)
+	}
+}
+
 // 呼び出し側のスライスを並べ替えないこと。
 // 一覧のキャッシュをそのまま渡す利用側があるため、破壊すると
 // キャッシュの中身が呼び出しごとに書き換わります。
