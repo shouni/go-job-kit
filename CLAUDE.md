@@ -72,8 +72,8 @@ golangci-lint run ./...
   The repository moved from Japanese on 2026-11-10; do not mix Japanese back in. Error strings follow
   Go style (lowercase, no trailing punctuation; ST1005).
 - **Japanese stays only as data**: strings compared at runtime and test fixtures (titles, IDs that
-  must fail validation). Subtest names (`t.Run` names and table `name` fields) are still Japanese and
-  have not been translated yet.
+  must fail validation). Subtest names (`t.Run` names and table `name` fields) are English
+  too.
 - **`README.md` is English and `README.ja.md` is its Japanese version.** Update the two together.
 
 ## Why this repository exists

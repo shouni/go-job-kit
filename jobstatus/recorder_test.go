@@ -260,10 +260,10 @@ func TestAlreadySucceeded(t *testing.T) {
 		state jobstatus.State
 		want  bool
 	}{
-		{name: "succeeded なら打ち切る", state: jobstatus.StateSucceeded, want: true},
-		{name: "running は続行", state: jobstatus.StateRunning, want: false},
+		{name: "succeeded stops", state: jobstatus.StateSucceeded, want: true},
+		{name: "running continues", state: jobstatus.StateRunning, want: false},
 		// failed may be retried by Cloud Tasks, so it is not treated as finished.
-		{name: "failed は続行", state: jobstatus.StateFailed, want: false},
+		{name: "failed continues", state: jobstatus.StateFailed, want: false},
 	}
 
 	for _, tt := range tests {
