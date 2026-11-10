@@ -16,7 +16,7 @@ func TestSetGetDelete(t *testing.T) {
 	defer c.Close()
 
 	if _, ok := c.Get("job-1"); ok {
-		t.Error("未設定のキーが取得できている")
+		t.Error("a key that was never set was returned")
 	}
 
 	c.Set("job-1", "value")
@@ -27,13 +27,13 @@ func TestSetGetDelete(t *testing.T) {
 
 	c.Delete("job-1")
 	if _, ok := c.Get("job-1"); ok {
-		t.Error("削除後も取得できている")
+		t.Error("value still returned after Delete")
 	}
 }
 
-// ストレージパスと同じ正規化をキーにも通すこと。
-// 揃っていないと、"dir/job-1" で書いた値を "job-1" で読めず、
-// 更新したはずの履歴が古いまま表示されます。
+// Keys go through the same normalization as storage paths.
+// Otherwise a value written as "dir/job-1" cannot be read as "job-1",
+// and history that was just updated is shown stale.
 func TestKeyIsNormalizedLikeStoragePath(t *testing.T) {
 	t.Parallel()
 
@@ -47,11 +47,11 @@ func TestKeyIsNormalizedLikeStoragePath(t *testing.T) {
 		t.Errorf("Get(\"job-1\") = %q, %v; want \"value\", true", got, ok)
 	}
 	if c.Len() != 1 {
-		t.Errorf("Len() = %d, want 1（正規化されず別エントリになっている）", c.Len())
+		t.Errorf("Len() = %d, want 1 (not normalized, so it became a separate entry)", c.Len())
 	}
 }
 
-// 正規化できない値でも、キャッシュとして使えないだけで落ちないこと。
+// A value that cannot be normalized still works; the cache just does not help.
 func TestUnnormalizableKeyStillUsable(t *testing.T) {
 	t.Parallel()
 
@@ -64,29 +64,29 @@ func TestUnnormalizableKeyStillUsable(t *testing.T) {
 	}
 }
 
-// 期限切れの値を返さないこと。
+// Expired values are not returned.
 func TestExpiredEntryIsNotReturned(t *testing.T) {
 	t.Parallel()
 
-	// バブル内の time.Sleep は仮想時間を進めるだけなので、保持期間の経過を
-	// 実時間を待たずに再現できます。
+	// time.Sleep inside the bubble only advances virtual time, so the retention period
+	// can elapse without waiting in real time.
 	synctest.Test(t, func(t *testing.T) {
 		c := cache.NewTTL[string](20 * time.Millisecond)
 		defer c.Close()
 
 		c.Set("job-1", "value")
-		// Sleep だけでは回収ゴルーチンが走った保証がありません。
-		// synctest.Sleep は時計を進めたうえで、ほかが落ち着くまで待ちます。
+		// Sleep alone does not guarantee the janitor goroutine ran.
+		// synctest.Sleep advances the clock and then waits for everything else to settle.
 		synctest.Sleep(60 * time.Millisecond)
 
 		if _, ok := c.Get("job-1"); ok {
-			t.Error("期限切れの値が返っている")
+			t.Error("expired value was returned")
 		}
 	})
 }
 
-// 期限切れエントリが回収されること。
-// 回収を開始し忘れると、ジョブ ID をキーにする用途では増え続けます。
+// Expired entries are reclaimed.
+// If reclaiming were never started, a cache keyed by job ID would grow without bound.
 func TestExpiredEntryIsEvicted(t *testing.T) {
 	t.Parallel()
 
@@ -96,13 +96,13 @@ func TestExpiredEntryIsEvicted(t *testing.T) {
 
 		c.Set("job-1", "value")
 
-		// 回収は NewTTL が起動したゴルーチンが行います。Sleep で保持期間を過ぎさせ、
-		// Wait でその回収が終わるまで待ちます。「いつかは回収されるはず」と
-		// 期限を切ってポーリングする必要はありません。
+		// The goroutine NewTTL started does the reclaiming. Sleep moves past the retention
+		// period, and Wait waits for the reclaiming to finish. There is no need to poll with a
+		// deadline for "it should be reclaimed eventually".
 		synctest.Sleep(30 * time.Millisecond)
 
 		if got := c.Len(); got != 0 {
-			t.Errorf("Len() = %d, want 0（期限切れエントリが回収されていない）", got)
+			t.Errorf("Len() = %d, want 0 (expired entry was not reclaimed)", got)
 		}
 	})
 }
@@ -115,7 +115,7 @@ func TestNonPositiveTTLFallsBackToDefault(t *testing.T) {
 
 	c.Set("job-1", "value")
 	if _, ok := c.Get("job-1"); !ok {
-		t.Error("既定の TTL が適用されていない")
+		t.Error("the default TTL was not applied")
 	}
 }
 
@@ -127,9 +127,9 @@ func TestCloseIsIdempotent(t *testing.T) {
 	c.Close()
 }
 
-// 複数のゴルーチンから同時に Close しても安全なこと。
-// 「停止済みか確認してから停止する」実装だと、判定と実行の間に割り込まれて
-// 二重停止になります。逐次の二重 Close ではこれを検出できません。
+// Closing concurrently from several goroutines is safe.
+// A "check it has stopped, then stop" implementation can be interrupted between the check and
+// the action and stop twice. Sequential double Close cannot detect that.
 func TestConcurrentCloseIsSafe(t *testing.T) {
 	t.Parallel()
 
@@ -143,7 +143,7 @@ func TestConcurrentCloseIsSafe(t *testing.T) {
 	for range goroutines {
 		go func() {
 			defer wg.Done()
-			<-start // 同時に踏ませる
+			<-start // hit it at the same time
 			c.Close()
 		}()
 	}

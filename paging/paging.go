@@ -1,7 +1,7 @@
-// Package paging は、ジョブ ID の一覧を新しい順に切り出し、画面表示に必要な
-// ページメタデータを組み立てます。
+// Package paging cuts a list of job IDs into pages, newest first, and builds the
+// page metadata a screen needs.
 //
-// ページ番号は 1 始まりです。perPage が 0 以下のときはページングせず全件を返します。
+// Page numbers start at 1. A perPage of 0 or less disables paging and returns every item.
 package paging
 
 import (
@@ -12,15 +12,15 @@ import (
 	"github.com/shouni/go-utils/paging"
 )
 
-// PageMeta は、一覧画面がページネーションを描画するために必要なメタデータです。
+// PageMeta is the metadata a list screen needs to render pagination.
 //
-// 実体は go-utils の paging.PageMeta です。Firestore 系の一覧（gcp-kit/jobstatus）と
-// 同じ型を返すことで、両方を 1 つの型で受ける M2M クライアントに対して、空一覧の
-// total_pages や 1 ページ目の prev_page といった端の値が食い違わないようにしています。
+// It is go-utils' paging.PageMeta. Returning the same type as the Firestore listings
+// (gcp-kit/jobstatus) keeps edge values such as total_pages for an empty list and
+// prev_page on page 1 from disagreeing for an M2M client that reads both through one type.
 type PageMeta = paging.PageMeta
 
-// SortKeyFunc は、ジョブ ID から並べ替えに使う文字列を取り出します。
-// 戻り値の降順が「新しい順」になるよう実装してください（選び方は SelectIDs を参照）。
+// SortKeyFunc extracts the string used for sorting from a job ID.
+// Implement it so that descending order of the result is "newest first" (see SelectIDs for how to choose one).
 type SortKeyFunc func(jobID string) string
 
 type options struct {
@@ -28,30 +28,31 @@ type options struct {
 	logger      *slog.Logger
 }
 
-// Option は LoadPage の挙動を変更します。
-// SelectIDs は読み込みを行わないため、いずれのオプションも影響しません。
+// Option changes how LoadPage behaves.
+// SelectIDs does no loading, so no option affects it.
 type Option func(*options)
 
-// SelectIDs は jobIDs を新しい順に並べ替え、指定ページ分を切り出します。
+// SelectIDs sorts jobIDs newest first and cuts out the requested page.
 //
-// sortKey は並べ替えに使うキーの取り出し方で、呼び出し側が必ず選びます。
-// オプションではなく引数なのは、既定を置くと間違った既定のまま呼べてしまうからです。
-// ここで誤っても一覧は正常に返り、順序だけが静かに崩れます。
+// sortKey is how the sort key is extracted, and the caller must always choose it.
+// It is a parameter rather than an option because a default would let callers keep calling
+// with the wrong default. A mistake here still returns a normal-looking list; only the order
+// silently breaks.
 //
-//   - 時刻を埋め込んだ ID なら go-utils の jobid.SortKey を渡してください。
-//     用途ごとに異なるプレフィックスを付けた ID が同じ一覧に混在する場合や、
-//     採番の形式が途中で変わった場合、ID の文字列比較は時刻ではなくプレフィックスの
-//     順になります（時刻部分より前に差が出るため）。移植元のアプリはいずれも
-//     この状態にあります。
-//   - nil を渡すと ID そのものの降順で並べます。ID が単一のプレフィックスを共有し、
-//     その直後に時刻が来る場合にだけ正しい並びになります。
+//   - For IDs that embed a timestamp, pass go-utils' jobid.SortKey.
+//     When IDs with different per-purpose prefixes share one list, or the ID format changed
+//     along the way, comparing the ID strings orders them by prefix rather than by time (the
+//     difference appears before the timestamp part). Every app this was ported from is in
+//     that situation.
+//   - nil sorts by the IDs themselves, descending. That order is correct only when the IDs
+//     share a single prefix immediately followed by the timestamp.
 //
-// キーが空文字を返した ID は末尾に回ります（降順で空文字が最小になるため）。
-// キーが同値のときは ID の降順で安定させます。
+// IDs whose key is the empty string go last (the empty string is the smallest in descending order).
+// Ties on the key are broken by the ID, descending.
 //
-// 引数のスライスは変更しません（並べ替えは複製に対して行います）。
-// page が範囲外のときは最終ページへ丸めます。メタデータの端の値（空一覧の TotalPages、
-// 1 ページ目の PrevPage など）は paging.New の規則に従います。
+// The argument slice is not modified (sorting happens on a copy).
+// An out-of-range page is clamped to the last page. Edge values of the metadata (TotalPages
+// for an empty list, PrevPage on page 1 and so on) follow paging.New's rules.
 func SelectIDs(jobIDs []string, page int, perPage int, sortKey SortKeyFunc) ([]string, PageMeta) {
 	sorted := slices.Clone(jobIDs)
 	sortDesc(sorted, sortKey)
@@ -65,7 +66,7 @@ func SelectIDs(jobIDs []string, page int, perPage int, sortKey SortKeyFunc) ([]s
 	return sorted[start:end], meta
 }
 
-// sortDesc は、ソートキーの降順（同値なら ID の降順）で並べ替えます。
+// sortDesc sorts by the sort key, descending (ties broken by the ID, descending).
 func sortDesc(jobIDs []string, sortKey SortKeyFunc) {
 	if sortKey == nil {
 		slices.Sort(jobIDs)
@@ -74,7 +75,7 @@ func sortDesc(jobIDs []string, sortKey SortKeyFunc) {
 	}
 
 	slices.SortFunc(jobIDs, func(a, b string) int {
-		// キーの降順。同値なら ID の降順で安定させる。
+		// Key descending; ties are broken by the ID, descending.
 		if c := cmp.Compare(sortKey(b), sortKey(a)); c != 0 {
 			return c
 		}
@@ -82,11 +83,11 @@ func sortDesc(jobIDs []string, sortKey SortKeyFunc) {
 	})
 }
 
-// AdjustItemCount は、実際に取得できた件数に合わせて From/To を補正します。
+// AdjustItemCount corrects From/To to match the number of items actually loaded.
 //
-// 一覧は ID を並べてからメタデータ本体を読みにいくため、一部の読み込みに失敗すると
-// 表示件数が SelectIDs の想定より少なくなります。「1〜10 件目を表示」と出しながら
-// 8 件しか並ばない、というズレを防ぐために使います。
+// A listing orders the IDs before reading the metadata itself, so when some reads fail the
+// page shows fewer items than SelectIDs expected. Use it to avoid saying "showing items
+// 1-10" while only 8 are listed.
 func AdjustItemCount(meta PageMeta, itemCount int) PageMeta {
 	return meta.WithItemCount(itemCount)
 }

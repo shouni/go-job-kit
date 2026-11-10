@@ -13,7 +13,7 @@ func TestSelectIDsPaginates(t *testing.T) {
 	ids := []string{"c1", "c3", "c2", "c5", "c4"}
 	selected, meta := SelectIDs(ids, 1, 2, nil)
 
-	// 降順（新しい順）にソートされた上で先頭2件
+	// Sorted descending (newest first), then the first two.
 	if want := []string{"c5", "c4"}; !slices.Equal(selected, want) {
 		t.Errorf("selected = %v, want %v", selected, want)
 	}
@@ -39,8 +39,8 @@ func TestSelectIDsClampsOutOfRangePage(t *testing.T) {
 	}
 }
 
-// page に 0 や負値が来ても 1 ページ目として扱うこと。
-// ページ番号はクエリ文字列から来るため、呼び出し側での検証に依存しません。
+// A page of 0 or a negative value is treated as page 1.
+// The page number comes from the query string, so this must not rely on the caller validating it.
 func TestSelectIDsClampsNonPositivePage(t *testing.T) {
 	t.Parallel()
 
@@ -73,37 +73,37 @@ func TestSelectIDsEmpty(t *testing.T) {
 	if len(selected) != 0 {
 		t.Errorf("selected = %v, want empty", selected)
 	}
-	// 0 件のときに "1〜0 件目" と表示されないよう From/To は 0 のままにする。
+	// With 0 items From/To stay 0, so the page never says "items 1-0".
 	if meta.Total != 0 || meta.From != 0 || meta.To != 0 || meta.HasNext || meta.HasPrev {
 		t.Errorf("meta = %+v, unexpected for empty input", meta)
 	}
 }
 
-// 端の値が Firestore 系の一覧（gcp-kit/jobstatus）と同じであること。
-// 両方を 1 つの型で受ける M2M クライアントがあるため、空一覧の TotalPages や
-// 1 ページ目の PrevPage が食い違うと、同じ契約の応答がサービスごとに変わります。
+// Edge values match the Firestore listing (gcp-kit/jobstatus).
+// An M2M client reads both through one type, so if TotalPages for an empty list or
+// PrevPage on page 1 disagreed, responses under the same contract would differ per service.
 func TestSelectIDsEdgeValuesMatchFirestoreListing(t *testing.T) {
 	t.Parallel()
 
 	_, empty := SelectIDs(nil, 5, 10, nil)
 	if empty.Page != 1 || empty.TotalPages != 1 || empty.HasPrev || empty.PrevPage != 1 || empty.NextPage != 1 {
-		t.Errorf("空一覧に page=5: meta = %+v, want Page 1 / TotalPages 1 / PrevPage 1 / NextPage 1", empty)
+		t.Errorf("page=5 on an empty list: meta = %+v, want Page 1 / TotalPages 1 / PrevPage 1 / NextPage 1", empty)
 	}
 
 	_, first := SelectIDs([]string{"c", "b", "a"}, 1, 2, nil)
 	if first.PrevPage != 1 || first.NextPage != 2 {
-		t.Errorf("1 ページ目: PrevPage %d NextPage %d, want 1 2", first.PrevPage, first.NextPage)
+		t.Errorf("page 1: PrevPage %d NextPage %d, want 1 2", first.PrevPage, first.NextPage)
 	}
 
 	_, last := SelectIDs([]string{"c", "b", "a"}, 2, 2, nil)
 	if last.NextPage != 2 || last.HasNext {
-		t.Errorf("最終ページ: NextPage %d HasNext %v, want 2 false", last.NextPage, last.HasNext)
+		t.Errorf("last page: NextPage %d HasNext %v, want 2 false", last.NextPage, last.HasNext)
 	}
 }
 
-// 呼び出し側のスライスを並べ替えないこと。
-// 一覧のキャッシュをそのまま渡す利用側があるため、破壊すると
-// キャッシュの中身が呼び出しごとに書き換わります。
+// The caller's slice is not reordered.
+// Some callers pass the cached listing as is, so mutating it would rewrite the
+// cache's contents on every call.
 func TestSelectIDsDoesNotMutateInput(t *testing.T) {
 	t.Parallel()
 
@@ -113,12 +113,12 @@ func TestSelectIDsDoesNotMutateInput(t *testing.T) {
 	SelectIDs(ids, 1, 2, nil)
 
 	if !slices.Equal(ids, original) {
-		t.Errorf("入力が変更された: %v, want %v", ids, original)
+		t.Errorf("input was modified: %v, want %v", ids, original)
 	}
 }
 
-// sortKey は、ID の文字列比較がプレフィックス順になってしまう一覧のためのもの。
-// 用途ごとに異なるプレフィックスが混在すると、これが無いと古いジョブが先頭に来ます。
+// sortKey is for listings where comparing ID strings orders them by prefix.
+// When different per-purpose prefixes are mixed, old jobs come first without it.
 func TestSelectIDsUsesSortKey(t *testing.T) {
 	t.Parallel()
 
@@ -135,7 +135,7 @@ func TestSelectIDsUsesSortKey(t *testing.T) {
 		"mv-20260711-010101-bbb",
 		"short-20260710-155126-ccc",
 		"video-recipe-20260706-194856-aaa",
-		"no-timestamp-job", // キーが空の ID は末尾へ
+		"no-timestamp-job", // IDs with an empty key go last
 	}
 	if !slices.Equal(selected, want) {
 		t.Errorf("selected = %v, want %v", selected, want)
@@ -145,7 +145,7 @@ func TestSelectIDsUsesSortKey(t *testing.T) {
 	}
 }
 
-// キーが同値のときは ID の降順で安定させること。
+// Ties on the key are broken by the ID, descending.
 func TestSelectIDsBreaksTiesByID(t *testing.T) {
 	t.Parallel()
 
@@ -164,7 +164,7 @@ func TestAdjustItemCountHandlesPartialFailures(t *testing.T) {
 
 	meta := PageMeta{Page: 1, PerPage: 2, Total: 5, From: 1, To: 2}
 
-	adjusted := AdjustItemCount(meta, 1) // 2件中1件だけ読み込めた想定
+	adjusted := AdjustItemCount(meta, 1) // assume only 1 of 2 items loaded
 	if adjusted.To != 1 {
 		t.Errorf("To = %d, want 1 (adjusted for partial load)", adjusted.To)
 	}
@@ -186,8 +186,8 @@ func TestAdjustItemCountWithoutPaging(t *testing.T) {
 	}
 }
 
-// embeddedTimestamp は、ID の途中に埋まった時刻を取り出すソートキーの例です。
-// 抽出規則そのものは利用側の ID 形式に依存するため、ライブラリには入れていません。
+// embeddedTimestamp is an example sort key that extracts a timestamp embedded mid-ID.
+// The extraction rule depends on the caller's ID format, so it is not part of the library.
 func embeddedTimestamp(jobID string) string {
 	const layout = "20060102150405"
 

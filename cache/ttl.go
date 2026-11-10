@@ -1,8 +1,8 @@
-// Package cache は、履歴一覧のための TTL 付きインメモリキャッシュを提供します。
-// TTL はジョブ ID をキーとしたメタデータの、IDList は一覧走査の結果のキャッシュです。
+// Package cache provides in-memory caches with TTL for history listings.
+// TTL caches metadata keyed by job ID, and IDList caches the result of a listing scan.
 //
-// 履歴一覧はジョブ ID を並べてから 1 件ずつメタデータを読みにいくため、ページを
-// めくるたびに同じオブジェクトを読み直します。それを避けるための薄いキャッシュです。
+// A history listing orders the job IDs and then reads the metadata one by one, so every page
+// turn rereads the same objects. These are thin caches to avoid that.
 package cache
 
 import (
@@ -13,25 +13,25 @@ import (
 	"github.com/shouni/go-utils/jobid"
 )
 
-// DefaultTTL は NewTTL に 0 以下を渡したときに使う保持期間です。
+// DefaultTTL is the retention period used when NewTTL is given 0 or less.
 const DefaultTTL = 10 * time.Minute
 
-// TTL は、ジョブ ID をキーとする TTL 付きキャッシュです。ゼロ値は使えません。
-// Close を含め、複数のゴルーチンから同時に呼び出せます。
+// TTL is a cache with TTL keyed by job ID. The zero value is not usable.
+// All methods, Close included, are safe for concurrent use by multiple goroutines.
 type TTL[T any] struct {
 	cache *ttlcache.Cache[string, T]
-	// closeOnce は、回収の停止をちょうど 1 回だけ行わせます。
+	// closeOnce makes the janitor stop exactly once.
 	closeOnce sync.Once
 }
 
-// NewTTL はキャッシュを生成し、期限切れエントリを回収するゴルーチンを開始します。
+// NewTTL creates a cache and starts the goroutine that reclaims expired entries.
 //
-// 回収を開始しないと、期限切れのエントリは同じキーが上書きされるまでメモリ上に
-// 残り続けます。ジョブ ID をキーにする用途では新しいジョブのぶんだけ増え続けるため、
-// 開始忘れがそのまま滞留につながります。呼び出し側の手順にせず生成時に開始し、
-// 停止は Close に集約しています。
+// Without that goroutine, expired entries stay in memory until the same key is overwritten.
+// Keyed by job ID, the cache grows by every new job, so forgetting to start it turns directly
+// into a build-up. It is started at creation rather than left as a step for the caller, and
+// stopping is gathered into Close.
 //
-// 使い終わったら Close を呼んでください。
+// Call Close when done with it.
 func NewTTL[T any](ttl time.Duration) *TTL[T] {
 	if ttl <= 0 {
 		ttl = DefaultTTL
@@ -40,8 +40,8 @@ func NewTTL[T any](ttl time.Duration) *TTL[T] {
 	c := &TTL[T]{
 		cache: ttlcache.New[string, T](
 			ttlcache.WithTTL[string, T](ttl),
-			// 参照のたびに期限が延びると、更新されない古い値がいつまでも残ります。
-			// 保持期間は「最後に書いてから」で数えます。
+			// If every read extended the expiry, a stale value that is never updated would stay forever.
+			// Retention counts from the last write.
 			ttlcache.WithDisableTouchOnHit[string, T](),
 		),
 	}
@@ -51,7 +51,7 @@ func NewTTL[T any](ttl time.Duration) *TTL[T] {
 	return c
 }
 
-// Get はキャッシュされた値を返します。未キャッシュ・期限切れのときは ok が false です。
+// Get returns the cached value. ok is false when it is not cached or has expired.
 func (c *TTL[T]) Get(jobID string) (value T, ok bool) {
 	item := c.cache.Get(key(jobID))
 	if item == nil {
@@ -61,36 +61,36 @@ func (c *TTL[T]) Get(jobID string) (value T, ok bool) {
 	return item.Value(), true
 }
 
-// Set は値をキャッシュへ保存します。
+// Set stores value in the cache.
 func (c *TTL[T]) Set(jobID string, value T) {
 	c.cache.Set(key(jobID), value, ttlcache.DefaultTTL)
 }
 
-// Delete はキャッシュから値を削除します。
+// Delete removes the value from the cache.
 func (c *TTL[T]) Delete(jobID string) {
 	c.cache.Delete(key(jobID))
 }
 
-// Len は保持しているエントリ数を返します。主にテスト・監視のためのものです。
+// Len returns the number of entries held. It is mainly for tests and monitoring.
 func (c *TTL[T]) Len() int {
 	return c.cache.Len()
 }
 
-// Close は回収用のゴルーチンを停止し、その終了まで待ちます。
+// Close stops the janitor goroutine and waits for it to finish.
 //
-// 何度呼んでも、複数のゴルーチンから同時に呼んでも安全です。停止処理を
-// sync.Once に通しているのは、「まだ停止していないか確認してから停止する」形にすると
-// 判定と実行の間に別のゴルーチンが割り込めるためです。
+// It is safe to call any number of times, concurrently from several goroutines. Stopping
+// goes through sync.Once because a "check it has not stopped yet, then stop" shape would let
+// another goroutine slip in between the check and the action.
 func (c *TTL[T]) Close() {
 	c.closeOnce.Do(c.cache.Stop)
 }
 
-// key は、キャッシュキーに使うジョブ ID を正規化します。
+// key normalizes the job ID used as a cache key.
 //
-// 同じジョブを指す "abc" と "dir/abc" が別エントリになると、更新したはずの値が
-// 読まれないキャッシュミスになります。ストレージパスと同じ正規化を通して揃えます。
-// 正規化できない値はキーとしてそのまま扱います（キャッシュの都合で呼び出しを
-// 失敗させるより、キャッシュが効かないだけに留めるほうが安全なため）。
+// If "abc" and "dir/abc", which name the same job, became separate entries, a value that was
+// just updated would not be read: a cache miss. They are aligned by the same normalization as
+// storage paths. A value that cannot be normalized is used as the key as is (leaving the
+// cache ineffective is safer than failing the call for the cache's sake).
 func key(jobID string) string {
 	safe, err := jobid.Sanitize(jobID)
 	if err != nil {

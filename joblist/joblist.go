@@ -1,12 +1,12 @@
-// Package joblist は、ストレージの疑似ディレクトリ走査からジョブ ID の一覧を集めます。
+// Package joblist collects a list of job IDs by scanning storage pseudo-directories.
 //
-// 「ジョブ 1 件 = プレフィックス直下のディレクトリ 1 つ」という配置は移植元の
-// アプリ全てで共通で、その走査コード（区切り文字を指定して 1 ジョブを 1 エントリで
-// 受け取り、疑似ディレクトリ名だけを拾う）も同じ形で 3 回書かれていました。
-// その形をここに集めます。
+// The layout "one job = one directory directly under a prefix" is shared by every app this
+// was ported from, and the scanning code (list with a delimiter so each job arrives as one
+// entry, then keep only the pseudo-directory names) was written in the same shape three
+// times. This package holds that shape.
 //
-// バケット全体の走査になるため、呼び出しは cache.IDList 越しに行うことを勧めます。
-// 集めた ID の並べ替えとページ切り出しは paging が担います。
+// It scans a whole bucket prefix, so calling it through cache.IDList is recommended.
+// Sorting the collected IDs and cutting pages is paging's job.
 package joblist
 
 import (
@@ -21,12 +21,12 @@ import (
 	"github.com/shouni/go-utils/jobid"
 )
 
-// Lister は Collect が必要とする一覧機能だけを表します。
-// remoteio.Store がそのまま満たします。
+// Lister is just the listing capability Collect needs.
+// remoteio.Store satisfies it as is.
 //
-// remoteio 側の複合インターフェースを直接受け取らないのは、このパッケージが
-// 5 つのアプリから参照されるハブで、必要以上の操作を要求すると
-// 呼び出し側のテストが使いもしない実装まで用意することになるためです。
+// The composite interface from remoteio is not taken directly because this package is a
+// hub referenced by five apps, and demanding more operations than needed would make the
+// callers' tests provide implementations they never use.
 type Lister interface {
 	List(ctx context.Context, name string, opts ...remoteio.ListOption) iter.Seq2[remoteio.Entry, error]
 }
@@ -35,12 +35,12 @@ type options struct {
 	keeps []func(jobID string) bool
 }
 
-// Option は Collect の挙動を変更します。
+// Option changes how Collect behaves.
 type Option func(*options)
 
-// WithKeep は、集めるジョブ ID を絞り込みます。複数指定した場合は、すべてを
-// 満たす ID だけが残ります（AND）。作業用ジョブの接頭辞を除くといった、
-// アプリ固有の除外に使ってください。
+// WithKeep narrows the collected job IDs. With several, only IDs that satisfy all of
+// them remain (AND). Use it for app-specific exclusions such as dropping a prefix used
+// for working jobs.
 func WithKeep(keep func(jobID string) bool) Option {
 	return func(o *options) {
 		if keep != nil {
@@ -49,32 +49,31 @@ func WithKeep(keep func(jobID string) bool) Option {
 	}
 }
 
-// WithValidIDsOnly は、jobid.Validate を通る ID だけを集めます。
+// WithValidIDsOnly collects only IDs that pass jobid.Validate.
 //
-// 既定で検証しないのは、ディレクトリ名が ID の形式を満たさないことが直ちに
-// 異常とは限らないためです（現行の採番より前に作られたジョブなど）。一覧から
-// 黙って消すか、読み込み側でフォールバック行として見せるかはアプリの判断なので、
-// 消してよい場合にだけ指定してください。
+// Validation is off by default because a directory name that does not match the ID format
+// is not necessarily an anomaly (jobs created before the current ID scheme, for example).
+// Whether to silently drop it from the list or show it as a fallback row on the read side is
+// the app's decision, so specify this only when dropping is acceptable.
 func WithValidIDsOnly() Option {
 	return WithKeep(jobid.IsValid)
 }
 
-// Collect は、prefix 直下の疑似ディレクトリ名をジョブ ID として集めます。
+// Collect collects the pseudo-directory names directly under prefix as job IDs.
 //
-// 区切り文字 "/" を指定して走査するため、ジョブ 1 件を 1 エントリとして
-// 受け取ります。指定しないと配下の成果物が全件返り、1 ジョブにつき成果物の
-// 数だけ結果を受け取ったうえで、呼び出し側で重複を潰すことになります。
-// 同じ走査をサーバー側へ寄せています。
+// It scans with the delimiter "/", so each job arrives as one entry. Without it every
+// artifact underneath would be returned, one result per artifact of each job, and the caller
+// would have to deduplicate. This pushes that same scan to the server side.
 //
-//   - prefix 直下に直接置かれたオブジェクト（"/" で終わらないパス）はジョブでは
-//     ないため対象外です
-//   - 拾えるのはディレクトリ名だけなので、メタデータの保存前に落ちたジョブも
-//     ID としては現れます。一覧に見せるかどうかは読み込み側で決めてください
-//   - 返す並び順はストレージの列挙順のままです。「新しい順」への並べ替えは
-//     paging.SelectIDs / paging.LoadPage が担います
+//   - Objects placed directly under prefix (paths not ending in "/") are not jobs and are
+//     skipped
+//   - Only directory names are picked up, so a job that failed before saving its metadata
+//     still appears as an ID. The read side decides whether to show it in the list
+//   - The order returned is the storage's enumeration order. Sorting newest first is
+//     paging.SelectIDs / paging.LoadPage's job
 //
-// prefix の末尾に "/" が無ければ補います。補わないと "…/music" の走査が
-// "…/music2/" 配下まで拾ってしまいます。
+// A missing trailing "/" on prefix is added. Without it a scan of "…/music" would also
+// pick up entries under "…/music2/".
 func Collect(ctx context.Context, reader Lister, prefix string, opts ...Option) ([]string, error) {
 	if reader == nil {
 		return nil, errors.New("joblist: reader is not configured")
@@ -97,12 +96,12 @@ func Collect(ctx context.Context, reader Lister, prefix string, opts ...Option) 
 			return nil, fmt.Errorf("joblist: list (%s): %w", prefix, err)
 		}
 
-		// 疑似ディレクトリだけを拾います。プレフィックス直下に置かれた
-		// オブジェクトはジョブではないため対象外です。
+		// Keep only pseudo-directories. Objects placed directly under the prefix are
+		// not jobs and are skipped.
 		//
-		// 以前は末尾が "/" かどうかで判定していました。ストレージ側は
-		// 「これは畳まれた階層だ」と知っているのに、文字列に潰されて
-		// 呼び出し側が推測し直す形になっていたためです。
+		// This used to be decided by whether the name ended in "/". The storage knew
+		// "this is a collapsed level", but that was flattened into a string and the
+		// caller had to guess it again.
 		if !entry.IsPrefix {
 			continue
 		}
@@ -119,7 +118,7 @@ func Collect(ctx context.Context, reader Lister, prefix string, opts ...Option) 
 	return jobIDs, nil
 }
 
-// keepAll は、登録された絞り込みをすべて満たすかを返します。
+// keepAll reports whether id satisfies every registered filter.
 func keepAll(keeps []func(string) bool, id string) bool {
 	for _, keep := range keeps {
 		if !keep(id) {

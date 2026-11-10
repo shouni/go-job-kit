@@ -15,7 +15,7 @@ import (
 
 const testPrefix = "gs://bucket/jobs/"
 
-// 一覧走査はバケット全体の List になるため、2 回目以降は走査せずに返すこと。
+// A listing scan is a List over the whole bucket, so later calls return without scanning.
 func TestIDListCachesCollectResult(t *testing.T) {
 	t.Parallel()
 
@@ -37,11 +37,11 @@ func TestIDListCachesCollectResult(t *testing.T) {
 	}
 
 	if calls != 1 {
-		t.Errorf("collect の呼び出し回数 = %d, want 1", calls)
+		t.Errorf("collect calls = %d, want 1", calls)
 	}
 }
 
-// キャッシュ本体を渡すと、受け取った側の並べ替えが他の並行リクエストへ波及する。
+// Handing out the cached slice would let a sort on the receiving side leak into other concurrent requests.
 func TestIDListReturnsCopy(t *testing.T) {
 	t.Parallel()
 
@@ -61,11 +61,11 @@ func TestIDListReturnsCopy(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if !slices.Equal(second, []string{"job-b", "job-a"}) {
-		t.Errorf("2 回目 = %v。1 回目の並べ替えがキャッシュへ波及している", second)
+		t.Errorf("second = %v; the first call's sort leaked into the cache", second)
 	}
 }
 
-// 削除・追加が TTL 分だけ画面に反映されない、という事態を防げること。
+// Prevents a delete or addition from staying invisible on screen for the length of the TTL.
 func TestIDListInvalidate(t *testing.T) {
 	t.Parallel()
 
@@ -85,12 +85,12 @@ func TestIDListInvalidate(t *testing.T) {
 	}
 
 	if calls != 2 {
-		t.Errorf("collect の呼び出し回数 = %d, want 2（破棄後は再走査）", calls)
+		t.Errorf("collect calls = %d, want 2 (rescan after discarding)", calls)
 	}
 }
 
-// 走査の途中で Invalidate されたら、その走査の結果（削除前の一覧）をキャッシュに
-// 入れないこと。入れてしまうと、削除したジョブが TTL の間一覧に残ります。
+// If Invalidate comes in during a scan, that scan's result (the pre-delete list) is not
+// cached. Otherwise a deleted job would stay in the list for the TTL.
 func TestIDListInvalidateDuringScan(t *testing.T) {
 	t.Parallel()
 
@@ -116,36 +116,36 @@ func TestIDListInvalidateDuringScan(t *testing.T) {
 				t.Errorf("Load() error = %v", err)
 			}
 		}()
-		synctest.Wait() // 走査が始まるまで待つ
+		synctest.Wait() // wait for the scan to start
 
-		// 走査中に削除が入った。以後の Load は進行中の走査に相乗りしない。
+		// A delete came in during the scan. Later Loads do not join the in-flight scan.
 		list.Invalidate(testPrefix)
 		got, err := list.Load(context.Background(), testPrefix, fresh)
 		if err != nil {
 			t.Fatalf("Load() error = %v", err)
 		}
 		if want := []string{"job-a"}; !slices.Equal(got, want) {
-			t.Errorf("Invalidate 直後の Load() = %v, want %v", got, want)
+			t.Errorf("Load() right after Invalidate = %v, want %v", got, want)
 		}
 
 		close(release)
 		<-done
 
-		// 古い走査が終わっても、新しい一覧を上書きしない。
+		// When the old scan finishes, it does not overwrite the new list.
 		got, err = list.Load(context.Background(), testPrefix, fresh)
 		if err != nil {
 			t.Fatalf("Load() error = %v", err)
 		}
 		if want := []string{"job-a"}; !slices.Equal(got, want) {
-			t.Errorf("古い走査の完了後の Load() = %v, want %v", got, want)
+			t.Errorf("Load() after the old scan completed = %v, want %v", got, want)
 		}
 		if got := calls.Load(); got != 2 {
-			t.Errorf("collect の呼び出し回数 = %d, want 2", got)
+			t.Errorf("collect calls = %d, want 2", got)
 		}
 	})
 }
 
-// 走査に失敗した結果はキャッシュせず、次の呼び出しでやり直すこと。
+// A failed scan is not cached; the next call retries.
 func TestIDListDoesNotCacheFailure(t *testing.T) {
 	t.Parallel()
 
@@ -163,11 +163,11 @@ func TestIDListDoesNotCacheFailure(t *testing.T) {
 		}
 	}
 	if calls != 2 {
-		t.Errorf("collect の呼び出し回数 = %d, want 2", calls)
+		t.Errorf("collect calls = %d, want 2", calls)
 	}
 }
 
-// 参照のたびに期限が延びると、新しいジョブがいつまでも一覧に現れない。
+// If every read extended the expiry, new jobs would never appear in the list.
 func TestIDListExpires(t *testing.T) {
 	t.Parallel()
 
@@ -188,12 +188,12 @@ func TestIDListExpires(t *testing.T) {
 		}
 
 		if calls != 2 {
-			t.Errorf("collect の呼び出し回数 = %d, want 2（期限切れ後は再走査）", calls)
+			t.Errorf("collect calls = %d, want 2 (rescan after expiry)", calls)
 		}
 	})
 }
 
-// キャッシュを任意機能として組み込めること（nil でも走査は成立する）。
+// The cache can be wired in as an optional feature (scanning still works with nil).
 func TestIDListNilReceiver(t *testing.T) {
 	t.Parallel()
 
@@ -214,7 +214,7 @@ func TestIDListNilReceiver(t *testing.T) {
 	}
 }
 
-// 履歴画面は複数リクエストから同時に開かれる。
+// The history screen is opened by several requests at once.
 func TestIDListConcurrentAccess(t *testing.T) {
 	t.Parallel()
 
@@ -231,7 +231,7 @@ func TestIDListConcurrentAccess(t *testing.T) {
 				t.Errorf("Load() error = %v", err)
 				return
 			}
-			slices.Sort(got) // 受け取った側での書き換えが他へ波及しないこと
+			slices.Sort(got) // a write on the receiving side must not leak to others
 			if i%10 == 0 {
 				list.Invalidate(testPrefix)
 			}
@@ -240,8 +240,8 @@ func TestIDListConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-// 同時のキャッシュミスでは走査を 1 回にまとめること。一覧走査はプレフィックス配下
-// 全体の List なので、TTL が切れた瞬間に重なったリクエストの数だけ走らせない。
+// Concurrent cache misses collapse into one scan. A listing scan is a List over the whole
+// prefix, so it must not run once per request that piles up the moment the TTL expires.
 func TestIDListConcurrentMissRunsCollectOnce(t *testing.T) {
 	t.Parallel()
 
@@ -265,12 +265,12 @@ func TestIDListConcurrentMissRunsCollectOnce(t *testing.T) {
 			})
 		}
 
-		// 全員が走査に合流するのを待ってから、まとめて解放する。
+		// Wait for everyone to join the scan, then release them all.
 		//
-		// 「走査が始まった」だけを待って解放すると、まだ Load へ入っていない呼び出しが
-		// 残っていることがあり、その分が 2 回目の走査を始めてしまう（実際に稀に落ちていた）。
-		// Wait はバブル内の他のゴルーチンがすべて継続的にブロックした時点で返るので、
-		// 「全員が合流済み」を待ち時間の見積もりなしに保証できる。
+		// Releasing as soon as "the scan has started" can leave calls that have not entered Load
+		// yet, and those start a second scan (this did fail now and then).
+		// Wait returns once every other goroutine in the bubble is durably blocked, so it
+		// guarantees "everyone has joined" without estimating a wait time.
 		synctest.Wait()
 		close(release)
 		wg.Wait()
@@ -284,13 +284,13 @@ func TestIDListConcurrentMissRunsCollectOnce(t *testing.T) {
 			}
 		}
 		if got := calls.Load(); got != 1 {
-			t.Errorf("collect の呼び出し回数 = %d, want 1（同時ミスは 1 回の走査にまとめる）", got)
+			t.Errorf("collect calls = %d, want 1 (concurrent misses collapse into one scan)", got)
 		}
 	})
 }
 
-// 待っている呼び出しは自分の ctx にだけ従うこと。走査そのものは放棄せず、
-// 完了すればキャッシュを温める。
+// A waiting call follows only its own ctx. The scan itself is not abandoned and warms
+// the cache when it completes.
 func TestIDListWaiterHonorsOwnContext(t *testing.T) {
 	t.Parallel()
 
@@ -306,17 +306,17 @@ func TestIDListWaiterHonorsOwnContext(t *testing.T) {
 		return []string{"job-a"}, nil
 	}
 
-	// 走査を始める側は塞がったまま。
+	// The call that starts the scan stays blocked.
 	leaderDone := make(chan struct{})
 	go func() {
 		defer close(leaderDone)
 		if _, err := list.Load(context.Background(), testPrefix, collect); err != nil {
-			t.Errorf("走査側の Load() error = %v", err)
+			t.Errorf("scanning Load() error = %v", err)
 		}
 	}()
 	<-entered
 
-	// 待ち側は自分の ctx が終わった時点で抜ける（走査の完了を待たされない）。
+	// The waiter leaves as soon as its own ctx ends (it is not made to wait for the scan).
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := list.Load(ctx, testPrefix, collect); !errors.Is(err, context.Canceled) {
@@ -326,7 +326,7 @@ func TestIDListWaiterHonorsOwnContext(t *testing.T) {
 	close(release)
 	<-leaderDone
 
-	// 抜けたあとも走査は完了しており、キャッシュから読めること。
+	// After it left, the scan still completed and can be read from the cache.
 	got, err := list.Load(context.Background(), testPrefix, collect)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -335,12 +335,12 @@ func TestIDListWaiterHonorsOwnContext(t *testing.T) {
 		t.Errorf("Load() = %v", got)
 	}
 	if callCount := calls.Load(); callCount != 1 {
-		t.Errorf("collect の呼び出し回数 = %d, want 1（走査は放棄されない）", callCount)
+		t.Errorf("collect calls = %d, want 1 (the scan is not abandoned)", callCount)
 	}
 }
 
-// 走査を始めた呼び出しがキャンセルされても、待っていた呼び出しは巻き込まれず、
-// 自分の ctx で走査をやり直すこと。
+// When the call that started the scan is cancelled, the waiting calls are not dragged
+// along; they redo the scan with their own ctx.
 func TestIDListRetriesAfterLeaderCancel(t *testing.T) {
 	t.Parallel()
 
@@ -352,7 +352,7 @@ func TestIDListRetriesAfterLeaderCancel(t *testing.T) {
 		collect := func(ctx context.Context) ([]string, error) {
 			if calls.Add(1) == 1 {
 				close(entered)
-				<-ctx.Done() // 最初の走査はキャンセルされるまで塞がり、そのまま失敗する
+				<-ctx.Done() // the first scan blocks until cancelled, then fails
 				return nil, ctx.Err()
 			}
 			return []string{"job-a"}, nil
@@ -373,29 +373,29 @@ func TestIDListRetriesAfterLeaderCancel(t *testing.T) {
 			waiterIDs, waiterErr = list.Load(context.Background(), testPrefix, collect)
 		}()
 
-		// 待ち側が走査へ合流するまで待ってからキャンセルする。Wait はバブル内の
-		// 他のゴルーチンがすべて継続的にブロックした時点で返るので、「合流したはず」を
-		// 待ち時間で見積もらずに済み、合流前にキャンセルする取りこぼしも起きない。
+		// Wait for the waiter to join the scan, then cancel. Wait returns once every other
+		// goroutine in the bubble is durably blocked, so "it should have joined" needs no wait-time
+		// estimate, and cancelling before it joins cannot happen.
 		synctest.Wait()
 		cancelLeader()
 
 		<-waiterDone
 		if waiterErr != nil {
-			t.Fatalf("待ち側の Load() error = %v, want nil（他人のキャンセルに巻き込まれない）", waiterErr)
+			t.Fatalf("waiter's Load() error = %v, want nil (not dragged into another call's cancellation)", waiterErr)
 		}
 		if !slices.Equal(waiterIDs, []string{"job-a"}) {
-			t.Errorf("待ち側の Load() = %v", waiterIDs)
+			t.Errorf("waiter's Load() = %v", waiterIDs)
 		}
 		if err := <-leaderErr; !errors.Is(err, context.Canceled) {
-			t.Errorf("走査側の Load() error = %v, want context.Canceled", err)
+			t.Errorf("scanning Load() error = %v, want context.Canceled", err)
 		}
 		if got := calls.Load(); got != 2 {
-			t.Errorf("collect の呼び出し回数 = %d, want 2（失敗した走査 + やり直し）", got)
+			t.Errorf("collect calls = %d, want 2 (failed scan + retry)", got)
 		}
 	})
 }
 
-// 既定の TTL が使われること（0 以下は DefaultIDListTTL へ丸める）。
+// The default TTL is used (0 or less is rounded to DefaultIDListTTL).
 func TestIDListDefaultTTL(t *testing.T) {
 	t.Parallel()
 

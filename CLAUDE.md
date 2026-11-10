@@ -66,6 +66,16 @@ test -z "$(gofmt -l .)"                            # CI fails on unformatted fil
 golangci-lint run ./...
 ```
 
+## Conventions
+
+- **Comments, doc comments, error / log / panic messages and test assertion messages are English.**
+  The repository moved from Japanese on 2026-11-10; do not mix Japanese back in. Error strings follow
+  Go style (lowercase, no trailing punctuation; ST1005).
+- **Japanese stays only as data**: strings compared at runtime and test fixtures (titles, IDs that
+  must fail validation). Subtest names (`t.Run` names and table `name` fields) are still Japanese and
+  have not been translated yet.
+- **`README.md` is English and `README.ja.md` is its Japanese version.** Update the two together.
+
 ## Why this repository exists
 
 `ap-comp`, `ap-mv` and the comic app (then `ap-comic`, now `ap-story`) each carried the same
@@ -207,7 +217,7 @@ Design constraints that are not visible from any single file:
   has to be called by two or more services (a single-service helper stays in that service's
   `internal/`), carry no service-specific domain, and sit on the job lifecycle. The middle rule is
   the one above; the first is why `joblist` waited for the third hand-written copy of the scanner.
-  This bar used to be a 収録基準 section in the README, where it addressed readers who are not the
+  This bar used to be an admission-criteria section in the README, where it addressed readers who are not the
   ones it constrains.
 
 ## Dependencies

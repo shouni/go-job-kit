@@ -15,11 +15,12 @@ import (
 
 const testBucket = "bucket"
 
-// newStore は、インメモリのストレージへ objects を流し込んだ Store を返します。
+// newStore returns a Store over in-memory storage seeded with objects.
 //
-// 以前はここに remoteio.Lister の手書き実装があり、区切り文字による疑似ディレクトリの
-// 畳み込みまで自前で写していました。本物とずれても気づけない形だったので、
-// remoteio が配っている memio に置き換えています（本物と同じ適合性スイートを通ります）。
+// This used to hold a hand-written remoteio.Lister that even copied the delimiter-based
+// collapsing of pseudo-directories itself. That shape could drift from the real thing
+// unnoticed, so it was replaced with the memio remoteio ships (it passes the same
+// conformance suite as the real backends).
 func newStore(t *testing.T, objects ...string) remoteio.Store {
 	t.Helper()
 
@@ -32,15 +33,15 @@ func newStore(t *testing.T, objects ...string) remoteio.Store {
 	return remoteio.NewStore(h)
 }
 
-// 疑似ディレクトリ名だけをジョブ ID として拾い、直下のオブジェクトと重複は除くこと。
+// Only pseudo-directory names are picked up as job IDs; direct objects and duplicates are dropped.
 func TestCollectKeepsOnlyPseudoDirectories(t *testing.T) {
 	t.Parallel()
 
 	store := newStore(t,
 		"jobs/job-a/status.json",
 		"jobs/job-b/status.json",
-		"jobs/job-b/result.mp4", // 同じジョブの成果物が複数あっても ID は 1 件
-		"jobs/readme.txt",       // 直下のオブジェクトはジョブではない
+		"jobs/job-b/result.mp4", // several artifacts of one job still give one ID
+		"jobs/readme.txt",       // an object directly under the prefix is not a job
 	)
 
 	got, err := joblist.Collect(context.Background(), store, "gs://bucket/jobs")
@@ -52,13 +53,13 @@ func TestCollectKeepsOnlyPseudoDirectories(t *testing.T) {
 	}
 }
 
-// prefix の末尾に "/" を補うこと。補わないと "…/music" の走査が "…/music2/" まで拾う。
+// A trailing "/" is added to prefix. Without it a scan of "…/music" would pick up "…/music2/" too.
 func TestCollectNormalizesPrefix(t *testing.T) {
 	t.Parallel()
 
 	store := newStore(t,
 		"music/job-a/status.json",
-		"music2/job-b/status.json", // 隣接するプレフィックスは拾わない
+		"music2/job-b/status.json", // an adjacent prefix is not picked up
 	)
 
 	got, err := joblist.Collect(context.Background(), store, "gs://bucket/music")
@@ -70,8 +71,8 @@ func TestCollectNormalizesPrefix(t *testing.T) {
 	}
 }
 
-// アプリ固有の除外（作業用ジョブの接頭辞など）を WithKeep で差し込めること。
-// 複数指定は AND になること。
+// App-specific exclusions (such as a prefix for working jobs) can be plugged in with WithKeep.
+// Several are combined with AND.
 func TestCollectWithKeep(t *testing.T) {
 	t.Parallel()
 
@@ -93,14 +94,14 @@ func TestCollectWithKeep(t *testing.T) {
 	}
 }
 
-// WithValidIDsOnly は jobid.Validate を通る ID だけを残すこと。
+// WithValidIDsOnly keeps only IDs that pass jobid.Validate.
 func TestCollectWithValidIDsOnly(t *testing.T) {
 	t.Parallel()
 
 	store := newStore(t,
 		"jobs/comp-20260816-abcd/status.json",
-		"jobs/-leading-hyphen/status.json", // 先頭が英数字でない ID は不正
-		"jobs/日本語/status.json",             // 使用可能な文字の外
+		"jobs/-leading-hyphen/status.json", // an ID not starting with an alphanumeric is invalid
+		"jobs/日本語/status.json",             // outside the allowed characters
 	)
 
 	got, err := joblist.Collect(context.Background(), store, "gs://bucket/jobs/", joblist.WithValidIDsOnly())
@@ -112,7 +113,7 @@ func TestCollectWithValidIDsOnly(t *testing.T) {
 	}
 }
 
-// 走査の失敗は、どのプレフィックスで失敗したか分かる形で返すこと。
+// A scan failure is returned in a form that tells which prefix failed.
 func TestCollectWrapsListError(t *testing.T) {
 	t.Parallel()
 
@@ -132,11 +133,11 @@ func TestCollectWrapsListError(t *testing.T) {
 		t.Fatalf("Collect() error = %v, want wrapping %v", err, wantErr)
 	}
 	if !strings.Contains(err.Error(), "gs://bucket/jobs/") {
-		t.Errorf("エラーにプレフィックスが含まれていない: %v", err)
+		t.Errorf("error does not include the prefix: %v", err)
 	}
 }
 
-// 構成の誤りは走査の前に返すこと。
+// Configuration mistakes are returned before scanning.
 func TestCollectRejectsMissingConfiguration(t *testing.T) {
 	t.Parallel()
 

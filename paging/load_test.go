@@ -19,7 +19,7 @@ func discardLogger() paging.Option {
 	return paging.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
-// 並行に読み込んでも、SelectIDs が返した新しい順がそのまま保たれること。
+// Concurrent loading keeps the newest-first order SelectIDs returned.
 func TestLoadPageKeepsSelectionOrder(t *testing.T) {
 	t.Parallel()
 
@@ -41,11 +41,11 @@ func TestLoadPageKeepsSelectionOrder(t *testing.T) {
 	}
 }
 
-// ソートキーは引数で必ず選ばせること（既定のまま呼べる形にしない）。
+// The caller must always choose the sort key as a parameter (no shape that can be called with a default).
 func TestLoadPageUsesSortKey(t *testing.T) {
 	t.Parallel()
 
-	// {用途}-{時刻} 形式。ID の文字列比較では用途プレフィックス順になってしまう。
+	// {purpose}-{time} format. Comparing ID strings would order them by purpose prefix.
 	jobIDs := []string{"mv-300", "recipe-100", "short-200"}
 	items, _, err := paging.LoadPage(context.Background(), jobIDs, 1, 3,
 		func(jobID string) string {
@@ -63,8 +63,8 @@ func TestLoadPageUsesSortKey(t *testing.T) {
 	}
 }
 
-// 1 件の破損や競合する削除で、ページ全体を失わせないこと。
-// 表示件数もその分だけ補正されること。
+// One corrupt record or a racing delete does not lose the whole page,
+// and the displayed count is corrected by that much.
 func TestLoadPageSkipsFailedItems(t *testing.T) {
 	t.Parallel()
 
@@ -85,14 +85,14 @@ func TestLoadPageSkipsFailedItems(t *testing.T) {
 		t.Errorf("items = %v, want %v", items, want)
 	}
 	if meta.Total != 4 {
-		t.Errorf("Total = %d, want 4（一覧の総数は読み込み結果で変わらない）", meta.Total)
+		t.Errorf("Total = %d, want 4 (the list's total does not change with load results)", meta.Total)
 	}
 	if meta.To != 3 {
-		t.Errorf("To = %d, want 3（実際に並んだ件数へ補正）", meta.To)
+		t.Errorf("To = %d, want 3 (corrected to the items actually listed)", meta.To)
 	}
 }
 
-// 読み込みが軒並み失敗した結果の「0 件」を、正常な空一覧と取り違えないこと。
+// "0 items" caused by every read failing is not mistaken for a genuinely empty list.
 func TestLoadPageReturnsContextError(t *testing.T) {
 	t.Parallel()
 
@@ -108,7 +108,7 @@ func TestLoadPageReturnsContextError(t *testing.T) {
 	}
 }
 
-// 一部の読み込み失敗を一覧へ残したい場合は、load 側で代替値を返せること。
+// To keep some failed loads in the list, load can return a substitute value.
 func TestLoadPageWithFallbackInsideLoad(t *testing.T) {
 	t.Parallel()
 
@@ -132,7 +132,7 @@ func TestLoadPageWithFallbackInsideLoad(t *testing.T) {
 	}
 }
 
-// 同時実行数の上限を超えないこと（ストレージへの同時読み取りを抑えるため）。
+// The concurrency limit is never exceeded (to bound concurrent reads from storage).
 func TestLoadPageLimitsConcurrency(t *testing.T) {
 	t.Parallel()
 
@@ -159,12 +159,12 @@ func TestLoadPageLimitsConcurrency(t *testing.T) {
 	}
 
 	if got := peak.Load(); got > 4 {
-		t.Errorf("同時実行数の最大 = %d, want <= 4", got)
+		t.Errorf("peak concurrency = %d, want <= 4", got)
 	}
 }
 
-// 全ての取得枠が塞がっている間にキャンセルされたら、空いた枠で次の読み込みを
-// 始めないこと（枠待ちは ctx を見る）。
+// A cancellation while every slot is taken does not start the next read in a freed
+// slot (waiting for a slot watches ctx).
 func TestLoadPageStopsAcquiringAfterCancel(t *testing.T) {
 	t.Parallel()
 
@@ -173,7 +173,7 @@ func TestLoadPageStopsAcquiringAfterCancel(t *testing.T) {
 		started := make(chan struct{})
 		release := make(chan struct{})
 		var calls atomic.Int32
-		// ctx を無視して塞がる読み込み。1 件目が枠を占有し続ける。
+		// A load that blocks and ignores ctx. The first item keeps holding the slot.
 		load := func(context.Context, string) (string, error) {
 			if calls.Add(1) == 1 {
 				close(started)
@@ -190,11 +190,11 @@ func TestLoadPageStopsAcquiringAfterCancel(t *testing.T) {
 				paging.WithConcurrency(1), discardLogger())
 		}()
 
-		<-started // 1 件目が枠を取ってから
+		<-started // once the first item holds the slot
 		cancel()
-		// キャンセル後、枠待ちの唯一の出口は ctx.Done なので、release の前に
-		// 2 件目の取得待ちは抜けている。Wait でその抜けきりを待ってから枠を空け、
-		// 2 件目が始まらないことを確かめる（待ち時間の見積もりに頼らない）。
+		// After the cancel, the only way out of waiting for a slot is ctx.Done, so the second
+		// item has stopped waiting before release. Wait for that to finish, then free the slot
+		// and check that the second item does not start (no reliance on timing estimates).
 		synctest.Wait()
 		close(release)
 		<-done
@@ -203,12 +203,12 @@ func TestLoadPageStopsAcquiringAfterCancel(t *testing.T) {
 			t.Fatalf("LoadPage() error = %v, want context.Canceled", err)
 		}
 		if got := calls.Load(); got != 1 {
-			t.Errorf("load の呼び出し回数 = %d, want 1（キャンセル後に次を読み始めない）", got)
+			t.Errorf("load calls = %d, want 1 (no new read starts after cancel)", got)
 		}
 	})
 }
 
-// perPage が 0 以下ならページングせず全件を読み込むこと（SelectIDs と同じ）。
+// A perPage of 0 or less loads every item without paging (as SelectIDs does).
 func TestLoadPageWithoutPaging(t *testing.T) {
 	t.Parallel()
 
@@ -219,7 +219,7 @@ func TestLoadPageWithoutPaging(t *testing.T) {
 	}
 
 	if len(items) != 2 {
-		t.Errorf("items = %v, want 2 件", items)
+		t.Errorf("items = %v, want 2 items", items)
 	}
 	if meta.TotalPages != 1 || meta.To != 2 {
 		t.Errorf("meta = %+v", meta)
@@ -236,14 +236,14 @@ func TestLoadPageWithNoJobs(t *testing.T) {
 	}
 
 	if len(items) != 0 {
-		t.Errorf("items = %v, want 空", items)
+		t.Errorf("items = %v, want empty", items)
 	}
 	if meta.Total != 0 || meta.From != 0 || meta.To != 0 {
 		t.Errorf("meta = %+v", meta)
 	}
 }
 
-// 引数のスライスは変更しないこと（SelectIDs と同じ約束）。
+// The argument slice is not modified (the same promise as SelectIDs).
 func TestLoadPageDoesNotMutateInput(t *testing.T) {
 	t.Parallel()
 
@@ -256,6 +256,6 @@ func TestLoadPageDoesNotMutateInput(t *testing.T) {
 	}
 
 	if !slices.Equal(jobIDs, original) {
-		t.Errorf("引数が変更されている: %v, want %v", jobIDs, original)
+		t.Errorf("argument was modified: %v, want %v", jobIDs, original)
 	}
 }
