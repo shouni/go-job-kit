@@ -15,7 +15,7 @@ import (
 	"github.com/shouni/go-job-kit/jobstatus"
 )
 
-// fakeStore は jobstatus.StatusStore のインメモリ実装です。
+// fakeStore is an in-memory implementation of jobstatus.StatusStore.
 type fakeStore struct {
 	mu       sync.Mutex
 	saved    map[string]appStatus
@@ -54,8 +54,8 @@ func (f *fakeStore) Save(_ context.Context, jobID string, status appStatus) erro
 	return nil
 }
 
-// 再試行のたびにワーカーは状態を組み立て直すため、試行回数と投入時刻は
-// 前回の記録から引き継がれる必要がある。
+// The worker rebuilds the status on every retry, so the attempt count and submission time
+// must carry over from the previous record.
 func TestRecordCarriesOverAttemptsAndQueuedAt(t *testing.T) {
 	t.Parallel()
 
@@ -78,21 +78,21 @@ func TestRecordCarriesOverAttemptsAndQueuedAt(t *testing.T) {
 
 	got := store.saved[testJobID]
 	if got.Attempts != 3 {
-		t.Errorf("Attempts = %d, want 3（前回の 2 を引き継いで加算）", got.Attempts)
+		t.Errorf("Attempts = %d, want 3 (the previous 2 carried over and incremented)", got.Attempts)
 	}
 	if !got.QueuedAt.Equal(queuedAt) {
 		t.Errorf("QueuedAt = %v, want %v", got.QueuedAt, queuedAt)
 	}
 	if got.Title != "先に判明した題目" {
-		t.Errorf("Title = %q（今回空なら前回を引き継ぐ）", got.Title)
+		t.Errorf("Title = %q (an empty one this time takes the previous)", got.Title)
 	}
 	if got.State != jobstatus.StateFailed {
-		t.Errorf("State = %q, want failed（状態そのものは引き継がない）", got.State)
+		t.Errorf("State = %q, want failed (the state itself does not carry over)", got.State)
 	}
 }
 
-// 生成の途中で題目が確定するサービスがあるため、新しく判明した題目を
-// 古い値で上書きしてはいけない。
+// Some services settle the title mid-generation, so a newly known title must not be
+// overwritten by the old value.
 func TestRecordKeepsNewerTitle(t *testing.T) {
 	t.Parallel()
 
@@ -111,7 +111,7 @@ func TestRecordKeepsNewerTitle(t *testing.T) {
 	}
 }
 
-// 成功後に古い失敗理由が残り続けないこと。
+// An old failure reason does not linger after a success.
 func TestRecordDoesNotCarryOverError(t *testing.T) {
 	t.Parallel()
 
@@ -126,11 +126,11 @@ func TestRecordDoesNotCarryOverError(t *testing.T) {
 	})
 
 	if got := store.saved[testJobID].Error; got != "" {
-		t.Errorf("Error = %q, want 空文字", got)
+		t.Errorf("Error = %q, want empty string", got)
 	}
 }
 
-// サービス固有フィールドの引き継ぎは apply の prev から行える。
+// Service-specific fields can be carried over from apply's prev.
 func TestRecordExposesPreviousToApply(t *testing.T) {
 	t.Parallel()
 
@@ -150,11 +150,11 @@ func TestRecordExposesPreviousToApply(t *testing.T) {
 	})
 
 	if got := store.saved[testJobID].OutputDir; got != "gs://bucket/jobs/"+testJobID {
-		t.Errorf("OutputDir = %q（apply で引き継げていない）", got)
+		t.Errorf("OutputDir = %q (apply did not carry it over)", got)
 	}
 }
 
-// 未記録のジョブでは prev が nil で、そのまま保存されること。
+// For a job with no record, prev is nil and the status is saved as is.
 func TestRecordWithoutPreviousRecord(t *testing.T) {
 	t.Parallel()
 
@@ -169,14 +169,14 @@ func TestRecordWithoutPreviousRecord(t *testing.T) {
 	})
 
 	if sawPrev {
-		t.Error("未記録なのに prev が渡っている")
+		t.Error("prev was passed although nothing is recorded")
 	}
 	if got := store.saved[testJobID].State; got != jobstatus.StateQueued {
 		t.Errorf("State = %q, want queued", got)
 	}
 }
 
-// 記録の失敗で生成そのものを止めないこと（警告ログに留める）。
+// A failed record never stops the generation itself (a warning log only).
 func TestRecordSwallowsSaveFailure(t *testing.T) {
 	t.Parallel()
 
@@ -190,9 +190,9 @@ func TestRecordSwallowsSaveFailure(t *testing.T) {
 	})
 }
 
-// 前回の記録を読めなかったときは、引き継ぎが失われたことを警告ログに残すこと。
-// Attempts・QueuedAt がこの記録でリセットされるため、静かには進めない。
-// 記録そのものは行う（観測の欠けを理由に、失敗を増やさない）。
+// When the previous record cannot be read, a warning log says the carry-over was lost.
+// Attempts and QueuedAt are reset by this record, so it must not proceed silently.
+// The record itself is still written (a gap in observation is no reason to add failures).
 func TestRecordWarnsWhenPreviousUnreadable(t *testing.T) {
 	t.Parallel()
 
@@ -206,21 +206,21 @@ func TestRecordWarnsWhenPreviousUnreadable(t *testing.T) {
 		JobID: testJobID, State: jobstatus.StateRunning,
 	})
 
-	// getErr は Save には影響しないため、記録は行われている。
+	// getErr does not affect Save, so the record was written.
 	if got := store.saved[testJobID].State; got != jobstatus.StateRunning {
-		t.Errorf("State = %q, want running（読めなくても記録は行う）", got)
+		t.Errorf("State = %q, want running (record even when unreadable)", got)
 	}
 	if log := buf.String(); !strings.Contains(log, "carry-over skipped") || !strings.Contains(log, testJobID) {
-		t.Errorf("引き継ぎが失われた警告が無い: %q", log)
+		t.Errorf("no warning about the lost carry-over: %q", log)
 	}
 }
 
-// 未記録（ErrNotFound）は初回の記録として正常なので、警告ログを出さないこと。
+// No record (ErrNotFound) is normal for a first record, so no warning is logged.
 func TestRecordStaysQuietWhenNotRecorded(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeStore()
-	store.getErr = fmt.Errorf("%w: 未記録", jobstatus.ErrNotFound)
+	store.getErr = fmt.Errorf("%w: not recorded", jobstatus.ErrNotFound)
 
 	var buf bytes.Buffer
 	rec := jobstatus.NewRecorder(store,
@@ -230,11 +230,11 @@ func TestRecordStaysQuietWhenNotRecorded(t *testing.T) {
 	})
 
 	if got := buf.String(); got != "" {
-		t.Errorf("初回の記録なのにログが出ている: %q", got)
+		t.Errorf("logged although this is the first record: %q", got)
 	}
 }
 
-// 記録先が未設定でも呼び出せ、何も起きないこと。
+// With no destination configured, it can still be called and nothing happens.
 func TestRecorderWithoutStore(t *testing.T) {
 	t.Parallel()
 
@@ -260,10 +260,10 @@ func TestAlreadySucceeded(t *testing.T) {
 		state jobstatus.State
 		want  bool
 	}{
-		{name: "succeeded なら打ち切る", state: jobstatus.StateSucceeded, want: true},
-		{name: "running は続行", state: jobstatus.StateRunning, want: false},
-		// failed は Cloud Tasks が再試行しうるため終了とはみなさない。
-		{name: "failed は続行", state: jobstatus.StateFailed, want: false},
+		{name: "succeeded stops", state: jobstatus.StateSucceeded, want: true},
+		{name: "running continues", state: jobstatus.StateRunning, want: false},
+		// failed may be retried by Cloud Tasks, so it is not treated as finished.
+		{name: "failed continues", state: jobstatus.StateFailed, want: false},
 	}
 
 	for _, tt := range tests {
@@ -285,29 +285,29 @@ func TestAlreadySucceeded(t *testing.T) {
 	}
 }
 
-// 未記録は「完了していない」として続行できること。記録前の投入やこの機能より前の
-// ジョブでも起こる正常な状態なので、エラーにはしない。
+// No record continues as "not completed". It is a normal state, seen for submissions before
+// their first record and for jobs older than this feature, so it is not an error.
 func TestAlreadySucceededWhenNotRecorded(t *testing.T) {
 	t.Parallel()
 
 	store := newFakeStore()
-	store.getErr = fmt.Errorf("%w: 未記録", jobstatus.ErrNotFound)
+	store.getErr = fmt.Errorf("%w: not recorded", jobstatus.ErrNotFound)
 
 	rec := jobstatus.NewRecorder(store)
 	done, err := rec.AlreadySucceeded(context.Background(), testJobID)
 	if err != nil {
-		t.Fatalf("AlreadySucceeded() error = %v, want nil（未記録は正常）", err)
+		t.Fatalf("AlreadySucceeded() error = %v, want nil (no record is normal)", err)
 	}
 	if done {
 		t.Error("AlreadySucceeded() = true, want false")
 	}
 }
 
-// 状態を読めなかった場合はエラーを返すこと。
+// When the status cannot be read, an error is returned.
 //
-// false に倒すと完了済みジョブを再生成してしまい、このガードが防ぐはずのコストを
-// ガード自身が発生させます。true に倒すと未完了のジョブが二度と実行されません。
-// どちらへも倒さず、呼び出し側が再配信に委ねられるようにします。
+// Falling to false would regenerate a finished job: the guard itself would incur the cost it
+// exists to prevent. Falling to true would mean an unfinished job never runs again.
+// It falls neither way, so the caller can leave it to redelivery.
 func TestAlreadySucceededOnReadFailure(t *testing.T) {
 	t.Parallel()
 
@@ -317,7 +317,7 @@ func TestAlreadySucceededOnReadFailure(t *testing.T) {
 	rec := jobstatus.NewRecorder(store)
 	done, err := rec.AlreadySucceeded(context.Background(), testJobID)
 	if err == nil {
-		t.Fatal("AlreadySucceeded() error = nil, want error（読めないなら判断を返す）")
+		t.Fatal("AlreadySucceeded() error = nil, want error (hand the decision back when unreadable)")
 	}
 	if !errors.Is(err, jobstatus.ErrUnavailable) {
 		t.Errorf("error = %v, want wrapping ErrUnavailable", err)
@@ -327,7 +327,7 @@ func TestAlreadySucceededOnReadFailure(t *testing.T) {
 	}
 }
 
-// Status を埋め込んでいない型では引き継ぎが行われず、渡した値がそのまま保存されること。
+// A type that does not embed Status gets no carry-over and is saved as given.
 func TestRecordWithoutEmbeddedStatus(t *testing.T) {
 	t.Parallel()
 
@@ -345,11 +345,11 @@ func TestRecordWithoutEmbeddedStatus(t *testing.T) {
 		t.Fatalf("AlreadySucceeded() error = %v, want nil", err)
 	}
 	if done {
-		t.Error("AlreadySucceeded() = true, want false（終了判定を持たない型）")
+		t.Error("AlreadySucceeded() = true, want false (a type with no terminal check)")
 	}
 }
 
-// bare は Status を埋め込んでいない型です。
+// bare is a type that does not embed Status.
 type bare struct {
 	Note string
 }
@@ -371,11 +371,11 @@ func (b *bareStore) Save(_ context.Context, jobID string, status bare) error {
 	return nil
 }
 
-// Store をそのまま Recorder へ渡せること（利用側がアダプタを書かずに済むこと）。
+// A Store can be passed to Recorder directly (callers need not write an adapter).
 var _ jobstatus.StatusStore[appStatus] = (*jobstatus.Store[appStatus])(nil)
 
-// 完了済みのジョブが再配信されたとき、running や failed で上書きしないこと。
-// 巻き戻すと、ポーリング中の画面も再実行ガードも「まだ終わっていない」と読む。
+// A redelivered finished job is not overwritten with running or failed.
+// Rolled back, both a polling screen and the re-run guard would read "not done yet".
 func TestRecordDoesNotRollBackFinishedJob(t *testing.T) {
 	t.Parallel()
 
@@ -395,14 +395,14 @@ func TestRecordDoesNotRollBackFinishedJob(t *testing.T) {
 			})
 
 			if got := store.saved[testJobID].State; got != jobstatus.StateSucceeded {
-				t.Errorf("State = %q, want succeeded（再配信で巻き戻っている）", got)
+				t.Errorf("State = %q, want succeeded (rolled back by redelivery)", got)
 			}
 		})
 	}
 }
 
-// apply が状態を書き換える場合も巻き戻しを止めること。
-// 判定が apply の前だと、実際に保存される値と食い違って素通りする。
+// The rollback is stopped even when apply rewrites the state.
+// Checking before apply would disagree with the value actually saved and let it slip through.
 func TestRecordChecksRollbackAfterApply(t *testing.T) {
 	t.Parallel()
 
@@ -414,19 +414,19 @@ func TestRecordChecksRollbackAfterApply(t *testing.T) {
 	rec.Record(context.Background(), testJobID, appStatus{
 		JobID: testJobID, State: jobstatus.StateSucceeded,
 	}, func(next, _ *appStatus) {
-		next.State = jobstatus.StateRunning // apply が巻き戻す
+		next.State = jobstatus.StateRunning // apply rolls it back
 	})
 
 	if got := store.saved[testJobID].State; got != jobstatus.StateSucceeded {
-		t.Errorf("State = %q, want succeeded（apply 後の値で判定していない）", got)
+		t.Errorf("State = %q, want succeeded (not checked against the value after apply)", got)
 	}
 }
 
-// **完了済みのジョブへ queued を書くのは作り直しの投入なので、通すこと。**
+// **Writing queued onto a finished job is a rebuild submission, so it goes through.**
 //
-// 再配信されたタスクが書くのは running か failed で、queued を書くのはハンドラーを
-// 通った新しい依頼だけ。ここで弾くと記録が succeeded のまま残り、ワーカーの
-// 再実行ガードがその作り直しを「完了済み」と読んで一度も実行しない。
+// A redelivered task writes running or failed; only a new request that went through a
+// handler writes queued. Blocking it here would leave the record at succeeded, and the
+// worker's re-run guard would read the rebuild as "already done" and never run it.
 func TestRecordAllowsRequeueAfterSuccess(t *testing.T) {
 	t.Parallel()
 
@@ -446,15 +446,15 @@ func TestRecordAllowsRequeueAfterSuccess(t *testing.T) {
 
 	got := store.saved[testJobID]
 	if got.State != jobstatus.StateQueued {
-		t.Fatalf("State = %q, want queued（作り直しの投入が捨てられている）", got.State)
+		t.Fatalf("State = %q, want queued (the rebuild submission was dropped)", got.State)
 	}
-	// 作り直しでも投入時刻・試行回数・題目の引き継ぎはそのまま働く。
+	// Even for a rebuild, the submission time, attempt count and title still carry over.
 	if got.Attempts != 1 || got.Title != "前回の成果" {
-		t.Errorf("Attempts = %d, Title = %q（引き継ぎが働いていない）", got.Attempts, got.Title)
+		t.Errorf("Attempts = %d, Title = %q (carry-over is not working)", got.Attempts, got.Title)
 	}
 }
 
-// Begin は打ち切りの判定と running の記録を 1 回の読み取りで行うこと。
+// Begin performs the stop check and the running record with a single read.
 func TestBeginRecordsAndReadsOnce(t *testing.T) {
 	t.Parallel()
 
@@ -474,7 +474,7 @@ func TestBeginRecordsAndReadsOnce(t *testing.T) {
 		t.Fatalf("Begin() error = %v, want nil", err)
 	}
 	if done {
-		t.Error("Begin() = true, want false（未完了のジョブ）")
+		t.Error("Begin() = true, want false (an unfinished job)")
 	}
 
 	got := store.saved[testJobID]
@@ -482,15 +482,15 @@ func TestBeginRecordsAndReadsOnce(t *testing.T) {
 		t.Errorf("State = %q, want running", got.State)
 	}
 	if got.Attempts != 2 || !got.QueuedAt.Equal(queuedAt) {
-		t.Errorf("Attempts = %d, QueuedAt = %v（引き継ぎが働いていない）", got.Attempts, got.QueuedAt)
+		t.Errorf("Attempts = %d, QueuedAt = %v (carry-over is not working)", got.Attempts, got.QueuedAt)
 	}
-	// AlreadySucceeded + Record は同じ status.json を 2 度読んでいた。
+	// AlreadySucceeded + Record used to read the same status.json twice.
 	if store.getCount != 1 {
-		t.Errorf("Get 回数 = %d, want 1", store.getCount)
+		t.Errorf("Get count = %d, want 1", store.getCount)
 	}
 }
 
-// 完了済みなら true を返し、記録は行わないこと。
+// A finished job returns true and nothing is recorded.
 func TestBeginSkipsFinishedJob(t *testing.T) {
 	t.Parallel()
 
@@ -507,14 +507,14 @@ func TestBeginSkipsFinishedJob(t *testing.T) {
 		t.Fatalf("Begin() error = %v, want nil", err)
 	}
 	if !done {
-		t.Fatal("Begin() = false, want true（完了済み）")
+		t.Fatal("Begin() = false, want true (already finished)")
 	}
 	if got := store.saved[testJobID].State; got != jobstatus.StateSucceeded {
-		t.Errorf("State = %q, want succeeded（記録してはいけない）", got)
+		t.Errorf("State = %q, want succeeded (must not record)", got)
 	}
 }
 
-// 未記録は「完了していない」として続行し、初回の記録を行うこと。
+// No record continues as "not completed" and writes the first record.
 func TestBeginWhenNotRecorded(t *testing.T) {
 	t.Parallel()
 
@@ -525,7 +525,7 @@ func TestBeginWhenNotRecorded(t *testing.T) {
 		JobID: testJobID, State: jobstatus.StateRunning,
 	})
 	if err != nil {
-		t.Fatalf("Begin() error = %v, want nil（未記録は正常）", err)
+		t.Fatalf("Begin() error = %v, want nil (no record is normal)", err)
 	}
 	if done {
 		t.Error("Begin() = true, want false")
@@ -535,9 +535,9 @@ func TestBeginWhenNotRecorded(t *testing.T) {
 	}
 }
 
-// 状態を読めなかった場合はエラーを返し、記録も行わないこと。
-// 呼び出し側はそのまま再配信へ委ねるので、引き継ぎ元を失った running を
-// 書き残す意味がない。
+// When the status cannot be read, an error is returned and nothing is recorded.
+// The caller just leaves it to redelivery, so there is no point writing a running record
+// that has lost its carry-over source.
 func TestBeginOnReadFailure(t *testing.T) {
 	t.Parallel()
 
@@ -555,11 +555,11 @@ func TestBeginOnReadFailure(t *testing.T) {
 		t.Error("Begin() = true, want false")
 	}
 	if _, ok := store.saved[testJobID]; ok {
-		t.Error("読めなかったのに記録されている")
+		t.Error("recorded although the status could not be read")
 	}
 }
 
-// 記録先が未設定でも呼び出せ、続行できること。
+// With no destination configured, it can still be called and processing continues.
 func TestBeginWithoutStore(t *testing.T) {
 	t.Parallel()
 

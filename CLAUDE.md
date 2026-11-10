@@ -66,9 +66,19 @@ test -z "$(gofmt -l .)"                            # CI fails on unformatted fil
 golangci-lint run ./...
 ```
 
+## Conventions
+
+- **Comments, doc comments, error / log / panic messages and test assertion messages are English.**
+  The repository moved from Japanese on 2026-11-10; do not mix Japanese back in. Error strings follow
+  Go style (lowercase, no trailing punctuation; ST1005).
+- **Japanese stays only as data**: strings compared at runtime and test fixtures (titles, IDs that
+  must fail validation). Subtest names (`t.Run` names and table `name` fields) are English
+  too.
+- **`README.md` is English and `README.ja.md` is its Japanese version.** Update the two together.
+
 ## Why this repository exists
 
-`ap-comp`, `ap-mv` and the comic app (then `ap-comic`, now `ap-story`) each carried the same
+the music app (private), `ap-mv` and the comic app (then `ap-comic`, now `ap-story`) each carried the same
 job scaffolding — submit to Cloud Tasks, record progress to GCS, page through history — in
 their own `internal/` trees, several files byte-identical apart from the import path. This
 library holds that shared skeleton; the apps now delegate to it.
@@ -79,8 +89,8 @@ paths below, because adopting this library rewrote or deleted them. Read them fr
 *before* each migration:
 
 ```bash
-git -C ../ap-comp  show 7827cea^:internal/repository/history_page.go     # paging
-git -C ../ap-comp  show 7827cea^:internal/repository/job_status.go       # jobstatus
+git -C ../<music-app> show 7827cea^:internal/repository/history_page.go     # paging
+git -C ../<music-app> show 7827cea^:internal/repository/job_status.go       # jobstatus
 git -C ../ap-mv    show aa619d4^:internal/repository/history_cache.go    # cache
 ```
 
@@ -88,16 +98,16 @@ The comic app's copy (`ap-comic 250ff0d^`, `internal/domain/job_status.go`) is G
 `ap-story` starts with fresh history, so that hash resolves in the retired `ap-comic`
 repository but in no local checkout.
 
-The migration commits themselves (`ap-comp 7827cea`, `ap-comic 250ff0d`, `ap-mv aa619d4`) show
+The migration commits themselves (the music app's `7827cea`, `ap-comic 250ff0d`, `ap-mv aa619d4`) show
 what each app kept locally versus handed over.
 
 The copies had drifted before adoption. These divergences are settled here rather than
 reproduced, so do not reintroduce them as caller options:
 
-1. `ap-comp` normalized cache keys via `jobid.Sanitize`; `ap-mv` used the raw job ID. `cache.TTL`
+1. The music app normalized cache keys via `jobid.Sanitize`; `ap-mv` used the raw job ID. `cache.TTL`
    normalizes internally.
-2. `ap-comp`'s job status repository had `Delete`; the comic app's did not. `jobstatus.Store` has it.
-3. `ap-comp` and the comic app ran `go cache.Start()` on their ttlcaches; `ap-mv` never did, so its
+2. The music app's job status repository had `Delete`; the comic app's did not. `jobstatus.Store` has it.
+3. The music app and the comic app ran `go cache.Start()` on their ttlcaches; `ap-mv` never did, so its
    expired entries were never reclaimed. `cache.NewTTL` starts the janitor itself, which is why
    it also owns `Close`.
 4. `ap-mv` sorted history by a timestamp extracted from the job ID, the others sorted the ID
@@ -120,7 +130,7 @@ seven prefixes (`video-recipe`, `recipe`, `mv`, `short`, `regen-keyframe`, `rege
 regardless of date — `-` (0x2D) sorts below `2` (0x32), so every newly minted ID lands *after*
 every legacy one. Old jobs stay in GCS indefinitely, so the two formats coexist for good.
 
-`ap-comp` moved to `jobid.New("comp")` in the same round, from an unprefixed
+The music app moved to `jobid.New("comp")` in the same round, from an unprefixed
 `{timestamp}-{uuid8}`. Its own IDs happen to keep sorting correctly — a letter outranks a digit,
 so every new ID lands above every legacy one, and every new job really is newer — but that is a
 coincidence of the prefix's first byte, not a property to rely on. It also accepts
@@ -143,7 +153,7 @@ cache, concurrent page load — has all moved here (`jobstatus.Recorder`, `cache
   port directly, so none of them wraps it any more. Keep the shapes aligned — a divergence here
   reintroduces an adapter in every consumer, not one.
 - **`CarryOver` fills `Title` and `Command` when this record leaves them empty.** The rule arrived
-  with `ap-comp`, whose success record used to carry `Attempts`/`QueuedAt` but not `Title`, so a
+  with the music app, whose success record used to carry `Attempts`/`QueuedAt` but not `Title`, so a
   success recorded without one picked up the running record's — judged an improvement, since the
   title settles mid-generation. `Command` follows the same rule. Both are pinned by
   `TestCarryOverFillsOnlyEmptyTitleAndCommand`; they went untested long enough for the doc comment
@@ -207,7 +217,7 @@ Design constraints that are not visible from any single file:
   has to be called by two or more services (a single-service helper stays in that service's
   `internal/`), carry no service-specific domain, and sit on the job lifecycle. The middle rule is
   the one above; the first is why `joblist` waited for the third hand-written copy of the scanner.
-  This bar used to be a 収録基準 section in the README, where it addressed readers who are not the
+  This bar used to be an admission-criteria section in the README, where it addressed readers who are not the
   ones it constrains.
 
 ## Dependencies

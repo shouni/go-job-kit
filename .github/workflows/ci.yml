@@ -1,4 +1,4 @@
-# CI の実体は shouni/workflows。ジョブ構成とタグ運用の理由はそちらの README にある。
+# The CI itself lives in shouni/workflows; its README explains the job layout and how tags are used.
 name: CI
 
 on:

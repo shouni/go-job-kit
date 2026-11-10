@@ -19,7 +19,7 @@ profile.cov
 go.work
 go.work.sum
 
-# ローカルのビルド成果物とキャッシュ
+# Local build output and caches
 /bin/
 /.cache/
 /.gocache/
@@ -28,15 +28,15 @@ go.work.sum
 .env
 .env.*
 
-# 秘密情報（実在しなくても、置かれたら commit してはいけないもの）
+# Secrets (whether or not they exist, they must never be committed if placed here)
 credentials.json
 *.key
 *.pem
 
-# Claude Code のローカル設定
+# Claude Code local settings
 .claude/settings.local.json
 
-# エディタ / OS（マシンをまたぐためリポジトリ側に持つ）
+# Editor / OS (kept in the repository because work spans machines)
 .DS_Store
 .idea/
 .vscode/

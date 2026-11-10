@@ -9,8 +9,8 @@ import (
 	"github.com/shouni/go-job-kit/jobstatus"
 )
 
-// failed を終了扱いにしないこと。Cloud Tasks が再試行しうるため、
-// ここで打ち切ると再試行後の成功をクライアントが取り逃がします。
+// failed is not treated as finished. Cloud Tasks may retry it, so stopping here would
+// make the client miss a success after the retry.
 func TestIsTerminal(t *testing.T) {
 	t.Parallel()
 
@@ -44,7 +44,7 @@ func TestStampSetsJobIDAndUpdatedAt(t *testing.T) {
 	if !status.UpdatedAt.Equal(now) {
 		t.Errorf("UpdatedAt = %v, want %v", status.UpdatedAt, now)
 	}
-	// 一覧は queued_at の降順なので、打刻を忘れたジョブは末尾に沈む。未設定なら埋める。
+	// Listings sort by queued_at descending, so a job missing the stamp sinks to the bottom. Fill it when unset.
 	if !status.QueuedAt.Equal(now) {
 		t.Errorf("QueuedAt = %v, want %v (filled when zero)", status.QueuedAt, now)
 	}
@@ -57,8 +57,8 @@ func TestStampSetsJobIDAndUpdatedAt(t *testing.T) {
 	}
 }
 
-// IsTerminal は再実行ガード用、Finished / InFlight は表示・ポーリング用で、failed の
-// 扱いが違う（前者では終端ではなく、後者では終端）。gcp-kit の写しと同じ規則です。
+// IsTerminal is for the re-run guard, Finished / InFlight for display and polling, and they
+// treat failed differently (not terminal for the former, terminal for the latter). Same rule as gcp-kit's copy.
 func TestStatusPredicates(t *testing.T) {
 	t.Parallel()
 
@@ -87,12 +87,12 @@ func TestEnsureJobIDKeepsExistingValue(t *testing.T) {
 	status.EnsureJobID("other")
 
 	if status.JobID != "original" {
-		t.Errorf("JobID = %q, want original（既存の値が上書きされている）", status.JobID)
+		t.Errorf("JobID = %q, want original (the existing value was overwritten)", status.JobID)
 	}
 }
 
-// CarryOver が Title だけでなく Command も引き継ぐことを固定します。ここを
-// 留めていなかったあいだに doc コメントの方が実装から取り残されていました。
+// Pins that CarryOver carries over Command as well as Title. While this was
+// unpinned, the doc comment drifted away from the implementation.
 func TestCarryOverFillsOnlyEmptyTitleAndCommand(t *testing.T) {
 	t.Parallel()
 
@@ -105,7 +105,7 @@ func TestCarryOverFillsOnlyEmptyTitleAndCommand(t *testing.T) {
 		QueuedAt: time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC),
 	}
 
-	// 空の組み立てには前回の題目とコマンドが入る。
+	// An empty build gets the previous title and command.
 	var blank jobstatus.Status
 	blank.CarryOver(prev)
 
@@ -122,25 +122,25 @@ func TestCarryOverFillsOnlyEmptyTitleAndCommand(t *testing.T) {
 		t.Errorf("Command = %q, want %q", blank.Command, prev.Command)
 	}
 	if blank.State != "" || blank.Error != "" {
-		t.Errorf("State = %q, Error = %q, want どちらも空（今回の記録を表す値は引き継がない）", blank.State, blank.Error)
+		t.Errorf("State = %q, Error = %q, want both empty (values describing this record do not carry over)", blank.State, blank.Error)
 	}
 
-	// 今回の組み立てが持っている値は上書きされない。生成の途中で題目が確定する
-	// サービスがあるため、新しく判明した値を古い記録で潰してはいけません。
+	// Values this build already holds are not overwritten. Some services settle the title
+	// mid-generation, so a newly known value must not be clobbered by the old record.
 	fresh := jobstatus.Status{Title: "今回の題目", Command: "regenerate"}
 	fresh.CarryOver(prev)
 
 	if fresh.Title != "今回の題目" {
-		t.Errorf("Title = %q, want 今回の題目（前回の値で上書きされている）", fresh.Title)
+		t.Errorf("Title = %q, want 今回の題目 (overwritten by the previous value)", fresh.Title)
 	}
 	if fresh.Command != "regenerate" {
-		t.Errorf("Command = %q, want regenerate（前回の値で上書きされている）", fresh.Command)
+		t.Errorf("Command = %q, want regenerate (overwritten by the previous value)", fresh.Command)
 	}
 }
 
-// Attempts のタグが omitzero であることを、Store と同じ encoding/json/v2 で固定します。
-// v2 の omitempty は数値の 0 を空とみなさないので、omitempty へ戻すと
-// まだ動き出していないジョブの status.json に attempts:0 が現れます。
+// Pins that Attempts is tagged omitzero, using encoding/json/v2 as Store does.
+// v2's omitempty does not treat a numeric 0 as empty, so reverting to omitempty would make
+// attempts:0 appear in the status.json of a job that has not started yet.
 func TestAttemptsIsOmittedWhileZero(t *testing.T) {
 	t.Parallel()
 
@@ -149,7 +149,7 @@ func TestAttemptsIsOmittedWhileZero(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 	if strings.Contains(string(encoded), "attempts") {
-		t.Errorf("attempts が出ています: %s", encoded)
+		t.Errorf("attempts is present: %s", encoded)
 	}
 
 	encoded, err = json.Marshal(jobstatus.Status{JobID: "job-1", State: jobstatus.StateRunning, Attempts: 1})
@@ -157,6 +157,6 @@ func TestAttemptsIsOmittedWhileZero(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 	if !strings.Contains(string(encoded), `"attempts":1`) {
-		t.Errorf("attempts が落ちています: %s", encoded)
+		t.Errorf("attempts is missing: %s", encoded)
 	}
 }

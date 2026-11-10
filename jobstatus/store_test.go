@@ -20,7 +20,7 @@ const testBaseURI = "gs://bucket/jobs"
 
 const testStatusPath = testBaseURI + "/" + testJobID + "/status.json"
 
-// appStatus は、利用側がサービス固有のフィールドを足す典型例です。
+// appStatus is the typical case of a caller adding service-specific fields.
 type appStatus struct {
 	jobstatus.Status
 	OutputDir string `json:"output_dir,omitempty"`
@@ -30,8 +30,8 @@ func newStore(store *memStore) *jobstatus.Store[appStatus] {
 	return jobstatus.NewStore[appStatus](store, jobstatus.UnderJobDir(testBaseURI))
 }
 
-// 状態は成果物と同じジョブディレクトリ配下に置き、履歴削除（プレフィックス一括削除）で
-// 自動的に片付くようにする。
+// The status sits in the same job directory as the artifacts, so deleting history
+// (removing the prefix wholesale) cleans it up automatically.
 func TestSaveWritesInsideJobDirectory(t *testing.T) {
 	t.Parallel()
 
@@ -44,7 +44,7 @@ func TestSaveWritesInsideJobDirectory(t *testing.T) {
 	}
 
 	if !store.has(testStatusPath) {
-		t.Fatalf("status.json が %q に書かれていない。書き込み済み: %v", testStatusPath, store.keys())
+		t.Fatalf("status.json was not written to %q; written: %v", testStatusPath, store.keys())
 	}
 }
 
@@ -79,17 +79,17 @@ func TestSaveAndGetRoundTrip(t *testing.T) {
 	if got.OutputDir != original.OutputDir {
 		t.Errorf("OutputDir = %q", got.OutputDir)
 	}
-	// Save 側で必ず打刻されること（呼び出し側が設定し忘れても記録が残るように）。
+	// Save always stamps it (so a record remains even if the caller forgets to set it).
 	if got.JobID != testJobID {
 		t.Errorf("JobID = %q, want %q", got.JobID, testJobID)
 	}
 	if got.UpdatedAt.IsZero() {
-		t.Error("UpdatedAt が設定されていない")
+		t.Error("UpdatedAt is not set")
 	}
 }
 
-// 埋め込みによって JSON がフラットなまま保たれること。
-// 既存の status.json を読み書きし続けるための前提なので、ネストした形へ変えられません。
+// Embedding keeps the JSON flat.
+// It is the premise for continuing to read and write existing status.json files, so it cannot change to a nested shape.
 func TestStoredJSONStaysFlat(t *testing.T) {
 	t.Parallel()
 
@@ -104,21 +104,21 @@ func TestStoredJSONStaysFlat(t *testing.T) {
 
 	var raw map[string]any
 	if err := json.Unmarshal(store.get(t, testStatusPath), &raw); err != nil {
-		t.Fatalf("保存された JSON が不正: %v", err)
+		t.Fatalf("stored JSON is invalid: %v", err)
 	}
 
 	for _, key := range []string{"job_id", "command", "state", "updated_at", "output_dir"} {
 		if _, ok := raw[key]; !ok {
-			t.Errorf("トップレベルに %q が無い: %v", key, raw)
+			t.Errorf("%q missing at the top level: %v", key, raw)
 		}
 	}
 	if _, ok := raw["Status"]; ok {
-		t.Error("埋め込みが Status キーとしてネストしている")
+		t.Error("the embedding is nested under a Status key")
 	}
 }
 
-// 未記録は障害と区別できるよう ErrNotFound を返すこと。
-// 呼び出し側（ハンドラー）はこれを 404 に、それ以外を 500 にマップします。
+// A missing record returns ErrNotFound so it can be told apart from a failure.
+// Callers (handlers) map it to 404 and everything else to 500.
 func TestGetReturnsNotFoundForUnknownJob(t *testing.T) {
 	t.Parallel()
 
@@ -128,10 +128,10 @@ func TestGetReturnsNotFoundForUnknownJob(t *testing.T) {
 	}
 }
 
-// 未存在以外の読み取り失敗は ErrNotFound と区別すること。
+// Read failures other than not-found are kept apart from ErrNotFound.
 //
-// 両者を同じ扱いにすると、ストレージ障害中に完了済みジョブが「未記録」と読めてしまい、
-// Recorder.AlreadySucceeded が生成をやり直します。
+// Treating the two alike would let a finished job read as "not recorded" during a storage
+// outage, and Recorder.AlreadySucceeded would redo the generation.
 func TestGetDistinguishesUnavailableFromNotFound(t *testing.T) {
 	t.Parallel()
 
@@ -143,12 +143,12 @@ func TestGetDistinguishesUnavailableFromNotFound(t *testing.T) {
 		t.Fatalf("Get() error = %v, want ErrUnavailable", err)
 	}
 	if errors.Is(err, jobstatus.ErrNotFound) {
-		t.Error("読み取り失敗が ErrNotFound にも一致しています。呼び出し側が 404 と取り違えます")
+		t.Error("a read failure also matches ErrNotFound; callers would mistake it for a 404")
 	}
 }
 
-// 壊れた JSON は「未記録」ではなくデコード失敗として扱うこと。
-// 未記録と同じ扱いにすると、破損に気づかないまま再生成が走り続けます。
+// Corrupt JSON is treated as a decode failure, not as "not recorded".
+// Treating it as not recorded would keep regenerating without anyone noticing the corruption.
 func TestGetReturnsErrorForCorruptedJSON(t *testing.T) {
 	t.Parallel()
 
@@ -160,15 +160,15 @@ func TestGetReturnsErrorForCorruptedJSON(t *testing.T) {
 		t.Fatal("Get() error = nil, want a decode error")
 	}
 	if errors.Is(err, jobstatus.ErrNotFound) {
-		t.Error("壊れた JSON が未記録として扱われている")
+		t.Error("corrupt JSON was treated as not recorded")
 	}
 }
 
-// 途中で切れた書き込みに次の書き込みが続いた status.json を、黙って読まないこと。
+// A status.json where a truncated write was followed by the next write is not read silently.
 //
-// 従来の json.Decoder は JSON 値のあとに残ったバイト列を無視するため、
-// 1 つ目だけを読んで成功を返していました。破損に気づけないまま、その値で
-// 判断が進みます。
+// The old json.Decoder ignored bytes left after the JSON value, so it read only the first
+// one and reported success. Decisions then proceeded on that value without the corruption
+// being noticed.
 func TestGetRejectsTrailingData(t *testing.T) {
 	t.Parallel()
 
@@ -178,18 +178,18 @@ func TestGetRejectsTrailingData(t *testing.T) {
 
 	_, err := newStore(store).Get(context.Background(), testJobID)
 	if err == nil {
-		t.Fatal("Get() error = nil, want a decode error（末尾のバイト列を無視している）")
+		t.Fatal("Get() error = nil, want a decode error (trailing bytes were ignored)")
 	}
 	if errors.Is(err, jobstatus.ErrNotFound) {
-		t.Error("壊れた JSON が未記録として扱われている")
+		t.Error("corrupt JSON was treated as not recorded")
 	}
 }
 
-// **重複したキーを拒否すること。**
+// **Duplicate keys are rejected.**
 //
-// 従来の json.Decoder は後勝ちで読むため、succeeded を書いた記録に running が
-// 続いた形の破損が running として読めていました。再実行ガードが防いでいるはずの
-// 巻き戻しが、記録ではなく読み取りの側から入ってくる経路です。
+// The old json.Decoder read last-wins, so a corruption where running followed a record of
+// succeeded read as running. That is a path for exactly the rollback the re-run guard is
+// meant to prevent, entering from the read side rather than from recording.
 func TestGetRejectsDuplicateKeys(t *testing.T) {
 	t.Parallel()
 
@@ -199,15 +199,15 @@ func TestGetRejectsDuplicateKeys(t *testing.T) {
 
 	got, err := newStore(store).Get(context.Background(), testJobID)
 	if err == nil {
-		t.Fatalf("Get() error = nil, want a decode error（state = %q として読めている）", got.State)
+		t.Fatalf("Get() error = nil, want a decode error (read as state = %q)", got.State)
 	}
 	if errors.Is(err, jobstatus.ErrNotFound) {
-		t.Error("壊れた JSON が未記録として扱われている")
+		t.Error("corrupt JSON was treated as not recorded")
 	}
 }
 
-// 題目や失敗理由に & < > が含まれても、そのまま読める形で保存すること。
-// v1 の \u0026 形式も引き続き読めます（JSON として同値なため）。
+// A title or failure reason containing & < > is saved in a form that reads as is.
+// v1's \u0026 form still reads too (it is the same JSON value).
 func TestSaveDoesNotEscapeHTML(t *testing.T) {
 	t.Parallel()
 
@@ -223,13 +223,13 @@ func TestSaveDoesNotEscapeHTML(t *testing.T) {
 
 	written := string(store.get(t, testStatusPath))
 	if strings.Contains(written, `\u0026`) || strings.Contains(written, `\u003c`) {
-		t.Errorf("& や < が \\u00XX へ逃がされている: %s", written)
+		t.Errorf("& or < was escaped to \\u00XX: %s", written)
 	}
 	if !strings.Contains(written, "A & B <tag>") {
-		t.Errorf("題目がそのまま書かれていない: %s", written)
+		t.Errorf("title was not written as is: %s", written)
 	}
 
-	// v1 が書いた既存の status.json も読めること。
+	// Existing status.json files written by v1 still read.
 	store.seed(t, testStatusPath, []byte(
 		`{"job_id":"`+testJobID+`","state":"failed","title":"A \u0026 B \u003ctag\u003e"}`))
 	got, err := newStore(store).Get(context.Background(), testJobID)
@@ -241,7 +241,7 @@ func TestSaveDoesNotEscapeHTML(t *testing.T) {
 	}
 }
 
-// job_id を持たない古い記録でも、呼び出し側が ID 無しの値を受け取らないこと。
+// Even an old record without job_id never hands the caller a value without an ID.
 func TestGetBackfillsMissingJobID(t *testing.T) {
 	t.Parallel()
 
@@ -257,13 +257,13 @@ func TestGetBackfillsMissingJobID(t *testing.T) {
 	}
 }
 
-// パス風のジョブ ID は正規化され、ジョブディレクトリの外へ書き出されないこと。
+// A path-like job ID is normalized and never written outside the job directory.
 func TestSaveNormalizesPathTraversalJobID(t *testing.T) {
 	t.Parallel()
 
 	store := newMemStore()
 
-	// "../../etc/passwd" は末尾要素 "passwd" へ正規化され、baseURI 配下に収まる。
+	// "../../etc/passwd" normalizes to its last element "passwd" and stays under baseURI.
 	err := newStore(store).Save(context.Background(), "../../etc/passwd", appStatus{
 		State: jobstatus.StateQueued,
 	})
@@ -273,12 +273,12 @@ func TestSaveNormalizesPathTraversalJobID(t *testing.T) {
 
 	for _, path := range store.keys() {
 		if !strings.HasPrefix(path, testBaseURI+"/") || strings.Contains(path, "..") {
-			t.Fatalf("ジョブディレクトリの外へ書き込まれている: %q", path)
+			t.Fatalf("written outside the job directory: %q", path)
 		}
 	}
 }
 
-// 形式そのものが不正なジョブ ID は書き込みを試みずに拒否すること。
+// A job ID whose format is itself invalid is rejected without attempting a write.
 func TestSaveRejectsInvalidJobID(t *testing.T) {
 	t.Parallel()
 
@@ -291,11 +291,11 @@ func TestSaveRejectsInvalidJobID(t *testing.T) {
 		t.Fatal("Save() error = nil, want an error")
 	}
 	if len(store.keys()) != 0 {
-		t.Fatalf("不正なジョブ ID で書き込みが発生している: %v", store.keys())
+		t.Fatalf("a write happened with an invalid job ID: %v", store.keys())
 	}
 }
 
-// 状態は上書きで更新され、履歴が積み上がらないこと。
+// Status is updated by overwriting; history does not pile up.
 func TestSaveOverwritesPreviousStatus(t *testing.T) {
 	t.Parallel()
 
@@ -310,20 +310,20 @@ func TestSaveOverwritesPreviousStatus(t *testing.T) {
 	}
 
 	if got := len(store.keys()); got != 1 {
-		t.Fatalf("オブジェクト数 = %d, want 1（上書きされていない）: %v", got, store.keys())
+		t.Fatalf("object count = %d, want 1 (not overwritten): %v", got, store.keys())
 	}
 
 	var stored appStatus
 	if err := json.Unmarshal(store.get(t, testStatusPath), &stored); err != nil {
-		t.Fatalf("保存された JSON が不正: %v", err)
+		t.Fatalf("stored JSON is invalid: %v", err)
 	}
 	if stored.State != jobstatus.StateSucceeded {
-		t.Errorf("State = %q, want succeeded（最後の書き込みが残っていない）", stored.State)
+		t.Errorf("State = %q, want succeeded (the last write did not remain)", stored.State)
 	}
 }
 
-// 引数として渡した値を書き換えないこと。呼び出し側が同じ構造体を再利用しても
-// 打刻が漏れ出さないようにするためです。
+// The value passed as an argument is not rewritten, so stamps do not leak out when the
+// caller reuses the same struct.
 func TestSaveDoesNotMutateArgument(t *testing.T) {
 	t.Parallel()
 
@@ -334,12 +334,12 @@ func TestSaveDoesNotMutateArgument(t *testing.T) {
 	}
 
 	if status.JobID != "" || !status.UpdatedAt.IsZero() {
-		t.Errorf("引数が変更された: JobID=%q UpdatedAt=%v", status.JobID, status.UpdatedAt)
+		t.Errorf("argument was modified: JobID=%q UpdatedAt=%v", status.JobID, status.UpdatedAt)
 	}
 }
 
-// キャッシュさせない指定を付けて書くこと。状態は頻繁に変わるため、
-// CDN・ブラウザに保持されると古い進行状況が表示されます。
+// Writes carry a no-cache directive. Status changes often, so if a CDN or browser held it,
+// stale progress would be shown.
 func TestSavePassesWriteOptions(t *testing.T) {
 	t.Parallel()
 
@@ -351,12 +351,12 @@ func TestSavePassesWriteOptions(t *testing.T) {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	// 状態は頻繁に変わるため、CDN やブラウザにキャッシュさせてはいけません。
-	// 以前は「オプションが 2 つ渡された」という数だけを見ていましたが、
-	// memio が解決後の設定を返せるので中身で確かめます。
+	// Status changes often, so a CDN or browser must not cache it.
+	// This used to check only the count ("two options were passed"), but memio can return
+	// the resolved settings, so the contents are checked.
 	opts, ok := store.h.Options(testStatusPath)
 	if !ok {
-		t.Fatalf("status.json が書かれていない: %v", store.keys())
+		t.Fatalf("status.json was not written: %v", store.keys())
 	}
 	if opts.ContentType != "application/json; charset=utf-8" {
 		t.Errorf("Content-Type = %q, want application/json; charset=utf-8", opts.ContentType)
@@ -381,11 +381,11 @@ func TestDeleteRemovesStatus(t *testing.T) {
 	}
 
 	if len(store.keys()) != 0 {
-		t.Errorf("削除されていない: %v", store.keys())
+		t.Errorf("not deleted: %v", store.keys())
 	}
 }
 
-// Delete の失敗も、どの URI で失敗したかが分かる形で返すこと（Save と同じ形式）。
+// A Delete failure is also returned in a form that tells which URI failed (same format as Save).
 func TestDeleteWrapsError(t *testing.T) {
 	t.Parallel()
 
@@ -397,11 +397,11 @@ func TestDeleteWrapsError(t *testing.T) {
 		t.Fatalf("Delete() error = %v, want wrapping %v", err, store.deleteErr)
 	}
 	if !strings.Contains(err.Error(), testStatusPath) {
-		t.Errorf("エラーに URI が含まれていない: %v", err)
+		t.Errorf("error does not include the URI: %v", err)
 	}
 }
 
-// Status を埋め込んでいない型は打刻されず、そのまま保存されること。
+// A type that does not embed Status is not stamped and is saved as is.
 func TestSaveWithoutEmbeddedStatus(t *testing.T) {
 	t.Parallel()
 
@@ -417,10 +417,10 @@ func TestSaveWithoutEmbeddedStatus(t *testing.T) {
 
 	var raw map[string]any
 	if err := json.Unmarshal(store.get(t, testStatusPath), &raw); err != nil {
-		t.Fatalf("保存された JSON が不正: %v", err)
+		t.Fatalf("stored JSON is invalid: %v", err)
 	}
 	if _, ok := raw["updated_at"]; ok {
-		t.Error("Status を埋め込んでいないのに打刻されている")
+		t.Error("stamped although Status is not embedded")
 	}
 }
 
@@ -433,19 +433,20 @@ func TestUnderJobDirRejectsEmptyBase(t *testing.T) {
 	}
 }
 
-// memStore は memio を jobstatus のテスト向けに包んだものです。
+// memStore wraps memio for the jobstatus tests.
 //
-// 以前はここに Open / Write / Delete の手書き実装があり、「未存在は os.ErrNotExist で
-// 返す」といった約束を fake 側でも書き直していました。ずれても気づけない形なので、
-// remoteio が配っている memio へ寄せています（本物と同じ適合性スイートを通ります）。
-// 残しているのは、障害を注入するための可変フィールドと検証用のヘルパーだけです。
+// This used to hold hand-written Open / Write / Delete implementations that restated
+// promises such as "not-found is returned as os.ErrNotExist" on the fake side. That could
+// drift unnoticed, so it now builds on the memio remoteio ships (it passes the same
+// conformance suite as the real backends). What remains is only the mutable fields for
+// injecting failures and the helpers for checking.
 type memStore struct {
 	remoteio.Store
 	h *memio.Handler
 
-	// openErr は未存在以外の読み取り失敗（権限不足・障害）を再現します。
+	// openErr reproduces a read failure other than not-found (missing permissions, outage).
 	openErr error
-	// deleteErr は削除の失敗を再現します。
+	// deleteErr reproduces a delete failure.
 	deleteErr error
 }
 
@@ -467,7 +468,7 @@ func newMemStore() *memStore {
 	return m
 }
 
-// seed は前提となる内容を書き込みます（障害注入の影響を受けません）。
+// seed writes precondition content (unaffected by failure injection).
 func (m *memStore) seed(t *testing.T, uri string, data []byte) {
 	t.Helper()
 	if err := m.h.Seed(uri, data); err != nil {
@@ -475,7 +476,7 @@ func (m *memStore) seed(t *testing.T, uri string, data []byte) {
 	}
 }
 
-// get は保存されている内容を返します。
+// get returns the stored content.
 func (m *memStore) get(t *testing.T, uri string) []byte {
 	t.Helper()
 	data, err := remoteio.ReadAll(context.Background(), m.Store, uri)
@@ -485,7 +486,7 @@ func (m *memStore) get(t *testing.T, uri string) []byte {
 	return data
 }
 
-// has は対象が保存されているかを返します。
+// has reports whether the target is stored.
 func (m *memStore) has(uri string) bool {
 	ok, err := m.Exists(context.Background(), uri)
 	return err == nil && ok
@@ -493,29 +494,29 @@ func (m *memStore) has(uri string) bool {
 
 func (m *memStore) keys() []string { return m.h.URIs() }
 
-// 型引数にポインタ型を渡した場合、データを書く前に落とすこと。
+// A pointer type as the type parameter fails before any data is written.
 //
-// Store[*T] は Go として自然に書けてしまいますが、Save が any(&status) を Stamper へ
-// アサートする都合上、対象が **T になって一致しません。その結果 job_id が空で
-// updated_at がゼロ値の状態ファイルが、エラーもログも無しに書かれます。
-// 静かに壊れるより、構築時に落ちるほうが被害が小さいためガードしています。
+// Store[*T] is natural Go to write, but because Save asserts any(&status) to Stamper, the
+// asserted value becomes **T and does not match. The result is a status file with an empty
+// job_id and a zero updated_at, written with no error and no log. Failing at construction
+// does less harm than breaking quietly, hence the guard.
 func TestNewStoreRejectsPointerTypeParameter(t *testing.T) {
 	t.Parallel()
 
 	defer func() {
 		r := recover()
 		if r == nil {
-			t.Fatal("NewStore[*appStatus] が panic しませんでした。silent no-op になります")
+			t.Fatal("NewStore[*appStatus] did not panic; it would be a silent no-op")
 		}
 		if !strings.Contains(fmt.Sprint(r), "NewStore") {
-			t.Errorf("panic メッセージに関数名が含まれていません: %v", r)
+			t.Errorf("panic message does not include the function name: %v", r)
 		}
 	}()
 
 	_ = jobstatus.NewStore[*appStatus](newMemStore(), jobstatus.UnderJobDir("gs://b/jobs"))
 }
 
-// 埋め込みの無い型は従来どおり許容すること（打刻・引き継ぎが行われないだけ）。
+// A type without the embedding is still allowed (it just gets no stamping or carry-over).
 func TestNewStoreAllowsTypeWithoutEmbeddedStatus(t *testing.T) {
 	t.Parallel()
 

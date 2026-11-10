@@ -6,45 +6,45 @@ import (
 	"log/slog"
 )
 
-// StatusStore は、Recorder が必要とする最小限の読み書きです。
-// *Store[T] がそのまま満たします。
+// StatusStore is the minimal read and write Recorder needs.
+// *Store[T] satisfies it as is.
 //
-// Recorder が Store 型ではなくインターフェースを受けるのは、利用側が状態の保存先を
-// 差し替えられるようにするためです（テストの偽実装や、ストレージ以外への記録）。
+// Recorder takes an interface rather than the Store type so callers can swap where status
+// is stored (fakes in tests, or recording somewhere other than storage).
 //
-// アプリ側で状態保存の port を定義する場合も、この形に揃えておくことを勧めます。
-// 揃えておけば *Store[T] がそのまま port の実装になります。揃えなかった場合に必要なのは
-// 薄いアダプタ 1 つですが、利用側が増えるとその数だけ同じものが増えます。
+// When an app defines its own port for saving status, aligning it with this shape is
+// recommended: *Store[T] then implements the port directly. Without alignment all it takes
+// is one thin adapter, but the same adapter multiplies with every consumer.
 type StatusStore[T any] interface {
 	Get(ctx context.Context, jobID string) (T, error)
 	Save(ctx context.Context, jobID string, status T) error
 }
 
-// Carrier は、前回の記録から共通フィールドを引き継ぐために Recorder が使う
-// インターフェースです。
+// Carrier is the interface Recorder uses to carry common fields over from the previous
+// record.
 //
-// Status を埋め込んだ型は、メソッドの昇格によって自動的にこれを満たします。
-// 利用側が明示的に実装する必要はありません。埋め込んでいない型を渡した場合、
-// 引き継ぎは行われず、渡された値がそのまま保存されます。
+// Types embedding Status satisfy it automatically through method promotion. Callers do not
+// need to implement it explicitly. When a type that does not embed it is passed, nothing is
+// carried over and the value is saved as given.
 type Carrier interface {
 	Common() Status
 	CarryOver(prev Status)
 }
 
-// Recorder は、ワーカーがジョブの進行に合わせて状態を記録するための薄い層です。
+// Recorder is a thin layer for a worker to record status as a job progresses.
 //
-// 移植元の 3 サービスは、いずれも Store の上に同じ 3 つの振る舞いを重ねていました。
-// 個別に持つ必然性がないため、ここへ集約しています。
+// The three services this was ported from all layered the same three behaviours on top of
+// Store. There was no reason for each to keep its own, so they are gathered here.
 //
-//  1. 完了済みジョブの再実行ガード（AlreadySucceeded）
-//  2. 前回記録からの共通フィールドの引き継ぎ（Record）
-//  3. 記録の失敗で生成そのものを止めない（警告ログに留める）
+//  1. A re-run guard for finished jobs (AlreadySucceeded)
+//  2. Carrying common fields over from the previous record (Record)
+//  3. A failed record never stops the generation itself (a warning log only)
 //
-// 3 は、状態はあくまで観測のための記録であり、書けなかったことを理由に生成を
-// 中断するほうが害が大きいためです。
+// 3 is because status is only a record for observation, and aborting a generation because
+// it could not be written does more harm.
 //
-// ワーカーの入口では 1 と 2 が必ず並んで呼ばれるため、その組み合わせは Begin に
-// まとめてあります。
+// At the worker's entry point 1 and 2 are always called together, so that pair is gathered
+// into Begin.
 type Recorder[T any] struct {
 	store  StatusStore[T]
 	logger *slog.Logger
@@ -54,20 +54,20 @@ type recorderOptions struct {
 	logger *slog.Logger
 }
 
-// RecorderOption は Recorder の挙動を変更します。
+// RecorderOption changes how Recorder behaves.
 type RecorderOption func(*recorderOptions)
 
-// WithLogger は、記録の失敗を書き出すロガーを差し替えます。
-// 既定は slog.Default() です。
+// WithLogger replaces the logger that records failures to record.
+// The default is slog.Default().
 func WithLogger(logger *slog.Logger) RecorderOption {
 	return func(o *recorderOptions) { o.logger = logger }
 }
 
-// NewRecorder は Recorder を構築します。
+// NewRecorder builds a Recorder.
 //
-// store が nil の場合、記録は行われません（Enabled が false を返し、他のメソッドは
-// 何もしません）。状態の記録を任意機能として組み込めるようにするためのもので、
-// 利用側が呼び出しのたびに nil を確かめる必要はありません。
+// When store is nil, nothing is recorded (Enabled returns false and the other methods do
+// nothing). This lets status recording be wired in as an optional feature, without callers
+// checking for nil on every call.
 func NewRecorder[T any](store StatusStore[T], opts ...RecorderOption) *Recorder[T] {
 	mustNotBePointer[T]("NewRecorder")
 
@@ -82,36 +82,36 @@ func NewRecorder[T any](store StatusStore[T], opts ...RecorderOption) *Recorder[
 	return &Recorder[T]{store: store, logger: cfg.logger}
 }
 
-// Enabled は、状態の記録先が設定されているかどうかを返します。
+// Enabled reports whether a destination for status records is configured.
 func (r *Recorder[T]) Enabled() bool {
 	return r != nil && r.store != nil
 }
 
-// AlreadySucceeded は、そのジョブが既に完了しているかどうかを返します。
+// AlreadySucceeded reports whether the job has already completed.
 //
-// Cloud Tasks は at-least-once 配信なので、通知の失敗などでワーカーがエラーを返すと
-// 同じタスクが再配信されます。生成をまるごと呼び直すと生成コストがそのまま二重に
-// 発生するため、完了済みならワーカー側でここで打ち切ってください。
+// Cloud Tasks delivers at least once, so when a worker returns an error (because a
+// notification failed, say) the same task is delivered again. Calling the whole generation
+// again would double its cost, so the worker should stop here when the job is complete.
 //
 //	done, err := rec.AlreadySucceeded(ctx, task.JobID)
 //	if err != nil {
-//	    return err // 判定できないので再配信に委ねる
+//	    return err // cannot decide, so leave it to redelivery
 //	}
 //	if done {
 //	    return nil
 //	}
 //
-// 未記録（ErrNotFound）は「完了していない」として false を返します。記録が無いのは
-// 記録前の投入やこの機能より前のジョブでも起こる、正常な状態だからです。
+// No record (ErrNotFound) returns false, "not completed". A missing record is a normal
+// state, seen for submissions before their first record and for jobs older than this feature.
 //
-// 状態を読めなかった場合（ErrUnavailable）はエラーを返します。ここで false に倒すと
-// 完了済みのジョブを未完了と誤認して生成をやり直し、このガードが防ぐはずのコストを
-// ガード自身が発生させます。逆に true に倒すと、未完了のジョブを完了扱いにして
-// タスクを ACK してしまい、そのジョブは二度と実行されません。どちらへ倒しても
-// 誤りうるので判断を返し、呼び出し側がエラーを返して再配信に委ねられるようにします。
+// When the status could not be read (ErrUnavailable) it returns an error. Falling to false
+// here would mistake a finished job for an unfinished one and redo the generation: the guard
+// itself would incur the cost it exists to prevent. Falling to true would treat an unfinished
+// job as finished and ACK the task, so that job would never run. Either way can be wrong, so
+// the decision is handed back, letting the caller return an error and leave it to redelivery.
 //
-// これはジョブ単位のガードです。処理を継続タスクへ分割して実行する場合、その途中
-// （state=running）での再配信までは防げません。
+// This is a per-job guard. When the work is split into continuation tasks, it does not
+// prevent redelivery partway through (state=running).
 func (r *Recorder[T]) AlreadySucceeded(ctx context.Context, jobID string) (bool, error) {
 	if !r.Enabled() {
 		return false, nil
@@ -130,33 +130,33 @@ func (r *Recorder[T]) AlreadySucceeded(ctx context.Context, jobID string) (bool,
 	return false, nil
 }
 
-// Record は、前回の記録から共通フィールドを引き継いだうえで status を保存します。
+// Record saves status after carrying common fields over from the previous record.
 //
-// 引き継ぐのは Attempts・QueuedAt と、status 側が空のときの Title・Command です
-// （CarryOver を参照）。ワーカーは毎回タスクから状態を組み立て直すため、これが
-// 無いと再試行のたびに試行回数と投入時刻が失われます。
+// What carries over is Attempts, QueuedAt, and Title and Command when status leaves them
+// empty (see CarryOver). The worker rebuilds the status from the task every time, so without
+// this the attempt count and submission time would be lost on every retry.
 //
-// apply は引き継ぎの後、保存の前に呼ばれます。試行回数の加算や、サービス固有
-// フィールドの引き継ぎに使ってください。prev は前回の記録で、読めなかったときは
-// nil です。未記録（ErrNotFound）は初回の記録として黙って進み、それ以外の読み取り
-// 失敗は引き継ぎ元を失っている（Attempts・QueuedAt がこの記録でリセットされる）ため、
-// 警告ログを残します。
+// apply is called after the carry-over and before saving. Use it to increment the attempt
+// count or to carry over service-specific fields. prev is the previous record, nil when it
+// could not be read. No record (ErrNotFound) proceeds silently as the first record; any
+// other read failure has lost the source of the carry-over (Attempts and QueuedAt are reset
+// by this record), so it leaves a warning log.
 //
-//	// 投入を記録し、前回の成果物の在り処を残す
+//	// Record the submission and keep where the previous artifacts are
 //	rec.Record(ctx, req.JobID, newStatus(req, StateQueued), func(next, prev *JobStatus) {
 //	    if prev != nil {
 //	        next.OutputDir = prev.OutputDir
 //	    }
 //	})
 //
-// 前回が終了済み（IsTerminal）のとき、今回が running・failed なら保存しません
-// （queued は例外です。理由は rolledBack を参照）。判定に使う前回の記録は引き継ぎの
-// ために既に読んでいるので、ストレージへの往復は増えません。
+// When the previous record is finished (IsTerminal) and this one is running or failed, it is
+// not saved (queued is the exception; see rolledBack for why). The previous record used for
+// the check has already been read for the carry-over, so there is no extra storage round trip.
 //
-// 処理開始（running）の記録は Begin を使ってください。再実行ガードと同じ読み取りに
-// 相乗りできます。
+// Use Begin to record the start of processing (running); it shares the same read as the
+// re-run guard.
 //
-// 保存に失敗しても呼び出し側へは伝えず、警告ログに留めます。
+// A failed save is not reported to the caller; it stays a warning log.
 func (r *Recorder[T]) Record(ctx context.Context, jobID string, status T, apply ...func(next, prev *T)) {
 	if !r.Enabled() {
 		return
@@ -164,10 +164,10 @@ func (r *Recorder[T]) Record(ctx context.Context, jobID string, status T, apply 
 
 	prev, prevCommon, err := r.previous(ctx, jobID)
 	if err != nil {
-		// 未記録は初回の記録なので previous が握り潰している。ここへ来るのは
-		// 読み取り失敗・壊れた JSON で、引き継ぎが失われ Attempts・QueuedAt が
-		// この記録でリセットされるため、静かに進めず原因を残す。記録そのものは
-		// 行う（観測の欠けを理由に失敗を増やさない）。
+		// No record is the first record, which previous swallows. Getting here means a read
+		// failure or corrupt JSON: the carry-over is lost and Attempts and QueuedAt are reset by
+		// this record, so leave the cause rather than proceeding silently. The record itself is
+		// still written (a gap in observation is no reason to add failures).
 		r.logger.WarnContext(ctx, "failed to read previous job status; carry-over skipped",
 			"job_id", jobID, "error", err)
 	}
@@ -175,32 +175,31 @@ func (r *Recorder[T]) Record(ctx context.Context, jobID string, status T, apply 
 	r.save(ctx, jobID, status, prev, prevCommon, apply)
 }
 
-// Begin は、再実行ガードと処理開始の記録を 1 回の読み取りで行います。
-// 完了済みで何もしなかった場合に true を返します。
+// Begin performs the re-run guard and the record of starting work with a single read.
+// It returns true when the job was already finished and nothing was done.
 //
-// AlreadySucceeded で打ち切りを判定してから Record で running を書くと、Record が
-// 引き継ぎのために前回の記録を読み直すため、同じ status.json を 1 タスクで 2 度
-// 取得することになります。判定に要る情報は引き継ぎ元とまったく同じなので、
-// ここでまとめます。記録を伴わない打ち切り判定だけが要るときは AlreadySucceeded を
-// 使ってください。
+// Checking with AlreadySucceeded and then writing running with Record makes Record reread
+// the previous record for the carry-over, fetching the same status.json twice in one task.
+// The check needs exactly the same information as the carry-over source, so this does both.
+// When only the stop check is needed, without a record, use AlreadySucceeded.
 //
 //	done, err := rec.Begin(ctx, task.JobID, newStatus(task, StateRunning),
 //	    func(next, _ *JobStatus) { next.Attempts++ })
 //	if err != nil {
-//	    return err // 判定できないので再配信に委ねる
+//	    return err // cannot decide, so leave it to redelivery
 //	}
 //	if done {
 //	    return nil
 //	}
 //
-// 打ち切りの判断は AlreadySucceeded と同じです。未記録は「完了していない」として
-// false を返し、読めなかった場合はエラーを返します（理由は AlreadySucceeded を
-// 参照）。エラーを返すときは記録も行いません。引き継ぎ元を失ったまま Attempts と
-// QueuedAt をリセットした running を書き残しても、呼び出し側はそのまま再配信へ
-// 委ねるだけだからです。
+// The stop decision is the same as AlreadySucceeded's. No record returns false, "not
+// completed", and a read failure returns an error (see AlreadySucceeded for why). When it
+// returns an error it records nothing either: writing a running record with Attempts and
+// QueuedAt reset after losing the carry-over source would serve no purpose, since the caller
+// just leaves the task to redelivery.
 //
-// 渡す status は処理開始（running）を表すものにしてください。投入（queued）の記録は
-// 再実行ガードの対象ではないので Record を使います。
+// The status passed should describe the start of processing (running). Recording a
+// submission (queued) is not subject to the re-run guard, so use Record for it.
 func (r *Recorder[T]) Begin(ctx context.Context, jobID string, status T, apply ...func(next, prev *T)) (bool, error) {
 	if !r.Enabled() {
 		return false, nil
@@ -218,11 +217,11 @@ func (r *Recorder[T]) Begin(ctx context.Context, jobID string, status T, apply .
 	return false, nil
 }
 
-// previous は前回の記録を読み、値と共通フィールドを返します。
+// previous reads the previous record and returns the value and its common fields.
 //
-// 未記録（ErrNotFound）は初回の記録として正常なので、エラーではなく「前回なし」
-// （いずれも nil）として返します。Status を埋め込んでいない型では共通フィールドが
-// nil になり、引き継ぎも巻き戻しの判定も行われません。
+// No record (ErrNotFound) is normal for a first record, so it is returned as "no previous"
+// (both nil) rather than an error. For a type that does not embed Status the common fields
+// are nil, and neither carry-over nor the rollback check happens.
 func (r *Recorder[T]) previous(ctx context.Context, jobID string) (*T, *Status, error) {
 	status, err := r.store.Get(ctx, jobID)
 	if err != nil {
@@ -238,7 +237,7 @@ func (r *Recorder[T]) previous(ctx context.Context, jobID string) (*T, *Status, 
 	return &status, nil, nil
 }
 
-// save は引き継ぎ・apply・巻き戻しの判定を通してから保存します。
+// save saves after going through the carry-over, apply and the rollback check.
 func (r *Recorder[T]) save(ctx context.Context, jobID string, status T, prev *T, prevCommon *Status, apply []func(next, prev *T)) {
 	if prevCommon != nil {
 		if next, ok := any(&status).(Carrier); ok {
@@ -252,8 +251,8 @@ func (r *Recorder[T]) save(ctx context.Context, jobID string, status T, prev *T,
 		}
 	}
 
-	// 巻き戻しの判定は apply の後で行います。apply は状態を書き換えられるため、
-	// 実際に保存される値で見ないと素通りします。
+	// The rollback check runs after apply. apply can rewrite the state, so checking anything
+	// but the value actually saved would let it slip through.
 	next, hasCommon := common(&status)
 	if rolledBack(prevCommon, next, hasCommon) {
 		r.logger.InfoContext(ctx, "skipped job status record; job already finished",
@@ -270,18 +269,19 @@ func (r *Recorder[T]) save(ctx context.Context, jobID string, status T, prev *T,
 	}
 }
 
-// rolledBack は、前回が終了済みなのに今回がそうでない記録かどうかを返します。
+// rolledBack reports whether the previous record is finished but this one is not.
 //
-// Cloud Tasks の再配信で完了済みのジョブが running や failed へ巻き戻ると、
-// ポーリング中の画面も再実行ガードも「まだ終わっていない」と読みます。
-// AlreadySucceeded が守ろうとしているものを、記録の側から崩さないためのものです。
+// If Cloud Tasks redelivery rolled a finished job back to running or failed, both a polling
+// screen and the re-run guard would read "not done yet". This keeps the record side from
+// undermining what AlreadySucceeded protects.
 //
-// queued は例外です。再配信されたタスクが書くのは running か failed であり、
-// queued を書くのはハンドラーを通った新しい依頼だけだからです。同じジョブ ID での
-// 再投入は移植元で普通に起こります（呼び出し元が job_id を指定する経路と、履歴から
-// 同じ ID で作り直す経路の両方があります）。ここで queued まで弾くと、記録は
-// succeeded のまま残り、ワーカーの再実行ガードがその作り直しを「完了済み」と読んで
-// 一度も実行しないまま打ち切ります。防ぐはずの取りこぼしを、ガード自身が作ります。
+// queued is the exception. A redelivered task writes running or failed; only a new request
+// that went through a handler writes queued. Resubmission under the same job ID happens
+// normally in the apps this was ported from (there are both a path where the caller
+// specifies job_id and a path that rebuilds from history under the same ID). Blocking queued
+// here too would leave the record at succeeded, and the worker's re-run guard would read the
+// rebuild as "already done" and stop without ever running it: the guard itself would cause
+// the very loss it is meant to prevent.
 func rolledBack(prev *Status, next Status, hasCommon bool) bool {
 	if prev == nil || !hasCommon || !prev.IsTerminal() {
 		return false
@@ -289,8 +289,8 @@ func rolledBack(prev *Status, next Status, hasCommon bool) bool {
 	return !next.IsTerminal() && next.State != StateQueued
 }
 
-// common は、Status を埋め込んだ値から共通フィールドを取り出します。
-// 埋め込んでいない型では ok が false になり、引き継ぎも巻き戻しの判定も行われません。
+// common extracts the common fields from a value embedding Status.
+// For a type that does not embed it ok is false, and neither carry-over nor the rollback check happens.
 func common[T any](status *T) (Status, bool) {
 	carrier, ok := any(status).(Carrier)
 	if !ok {

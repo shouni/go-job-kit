@@ -1,101 +1,102 @@
-// Package jobstatus は、非同期ジョブの進行状況をリモートストレージ上の JSON として
-// 読み書きします。
+// Package jobstatus reads and writes the progress of asynchronous jobs as JSON in remote
+// storage.
 //
-// 生成の成否がこれまで Slack 通知にしか残らず、失敗したジョブが UI から消えていた
-// 問題を解消するための記録層です。あわせて、Cloud Tasks の at-least-once 配信に対する
-// 再実行ガードの根拠にもなります。
+// It is the record layer that fixes a problem where whether a generation succeeded was left
+// only in Slack notifications and failed jobs vanished from the UI. It also gives the re-run
+// guard against Cloud Tasks' at-least-once delivery something to stand on.
 package jobstatus
 
 import "time"
 
-// State はジョブのライフサイクル上の状態です。
+// State is a job's state in its lifecycle.
 type State string
 
 const (
-	// StateQueued はキューへ投入済みで、まだワーカーが処理を始めていない状態です。
+	// StateQueued means the job is on the queue and no worker has started on it yet.
 	StateQueued State = "queued"
-	// StateRunning はワーカーが処理中の状態です。
-	// 継続タスクへ分割して実行される処理では、引き継がれている間もこの状態です。
+	// StateRunning means a worker is processing the job.
+	// Work split into continuation tasks stays in this state while it is being handed over.
 	StateRunning State = "running"
-	// StateSucceeded は成果物の保存まで完了した状態です。
+	// StateSucceeded means everything up to saving the artifacts has completed.
 	StateSucceeded State = "succeeded"
-	// StateFailed は処理が失敗した状態です。Cloud Tasks による再試行の対象になり得ます。
+	// StateFailed means processing failed. It may be retried by Cloud Tasks.
 	StateFailed State = "failed"
 )
 
-// Status は、アプリ間で共通するジョブ進行状況のフィールドです。
+// Status holds the job progress fields shared across apps.
 //
-// 成果物の保存先はサービスごとに形が違う（単一 URI・出力ディレクトリ・複数 URI）ため、
-// ここには持たせません。利用側は本構造体を埋め込んだ型を定義してください。
-// Go は埋め込み構造体を JSON でフラットに展開するため、既存の status.json を
-// そのまま読み書きできます。
+// Where artifacts are stored differs in shape per service (a single URI, an output directory,
+// several URIs), so it is not kept here. Callers define a type that embeds this struct.
+// Go flattens embedded structs in JSON, so existing status.json files are read and written
+// as they are.
 //
 //	type JobStatus struct {
 //	    jobstatus.Status
 //	    OutputDir string `json:"output_dir,omitempty"`
 //	}
 //
-// 保存される status.json はフラットな形になります。埋め込みをやめると、この形で
-// 保存済みの状態ファイルが読めなくなります。
+// The stored status.json is flat. Stopping the embedding makes status files already stored
+// in this shape unreadable.
 //
 //	{
 //	  "job_id": "c20260726-120000-abcd1234",
 //	  "command": "generate",
 //	  "state": "running",
-//	  "title": "作品名",
+//	  "title": "Work title",
 //	  "attempts": 2,
 //	  "queued_at": "2026-07-26T12:00:00Z",
 //	  "updated_at": "2026-07-26T12:00:31Z",
 //	  "output_dir": "gs://bucket/jobs/c20260726-120000-abcd1234"
 //	}
 //
-// このため、入れ子のペイロード（共通フィールドを別のオブジェクトへまとめる形）は
-// 導入しないでください。
+// So do not introduce a nested payload (a shape that gathers the common fields into a
+// separate object).
 type Status struct {
 	JobID   string `json:"job_id"`
 	Command string `json:"command,omitempty"`
 	State   State  `json:"state"`
-	// Title は生成対象の題目が確定した時点で埋まります。
+	// Title is filled in once the subject of the generation is settled.
 	Title string `json:"title,omitempty"`
-	// Error は State が failed のときの失敗理由です。
+	// Error is the reason for failure when State is failed.
 	Error string `json:"error,omitempty"`
-	// Attempts はワーカーが処理を開始した回数です。2 以上なら再試行されています。
+	// Attempts is how many times a worker has started processing. 2 or more means it was retried.
 	//
-	// omitempty ではなく omitzero なのは、Store が encoding/json/v2 で書くためです。
-	// v2 の omitempty は数値の 0 を空とみなさないので、omitempty のままだと
-	// まだ動き出していないジョブの status.json に attempts:0 が残ります。
+	// It is omitzero rather than omitempty because Store writes through encoding/json/v2.
+	// v2's omitempty does not treat a numeric 0 as empty, so with omitempty the status.json
+	// of a job that has not started yet would keep attempts:0.
 	Attempts  int       `json:"attempts,omitzero"`
 	QueuedAt  time.Time `json:"queued_at,omitzero"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// IsTerminal は、再実行ガード（Recorder.Begin）が「もう実行しなくてよい」と判断する
-// 状態かどうかを返します。succeeded だけが真です。
+// IsTerminal reports whether the state is one the re-run guard (Recorder.Begin) treats as
+// "no need to run again". Only succeeded is true.
 //
-// failed は Cloud Tasks が再試行しうるため、ガードの意味では終端とみなしません。
-// 「ポーリングを止めてよいか」「一覧で進行中と表示するか」の判定には使わないでください。
-// それは Finished / InFlight です（キューが max_attempts = 1 なら failed も終わりです）。
+// failed may be retried by Cloud Tasks, so in the guard's sense it is not terminal.
+// Do not use it to decide "can polling stop" or "should the list show it as in progress";
+// those are Finished / InFlight (if the queue has max_attempts = 1, failed is the end too).
 func (s Status) IsTerminal() bool {
 	return s.State == StateSucceeded
 }
 
-// Finished は、succeeded または failed に達した（結末が出ていて、ポーリングを止めて
-// よい）かどうかを返します。IsTerminal と違い failed も含みます。
+// Finished reports whether the job reached succeeded or failed (the outcome is known and
+// polling can stop). Unlike IsTerminal it includes failed.
 func (s Status) Finished() bool {
 	return s.State == StateSucceeded || s.State == StateFailed
 }
 
-// InFlight は、queued または running（まだ結末が出ていない）かどうかを返します。
+// InFlight reports whether the job is queued or running (no outcome yet).
 func (s Status) InFlight() bool {
 	return s.State == StateQueued || s.State == StateRunning
 }
 
-// Stamp は、Store が保存時にジョブ ID と更新時刻を打刻するために呼びます。
-// 呼び出し側が UpdatedAt を設定し忘れても記録が残るようにするためのものです。
+// Stamp is called by Store to stamp the job ID and update time on save.
+// It keeps a record even when the caller forgets to set UpdatedAt.
 //
-// QueuedAt が未設定なら now を入れます。一覧は queued_at の降順で並ぶため、打刻を
-// 忘れたジョブは末尾に沈みます。投入時の記録だけが失敗したジョブも、次の記録で
-// ここが埋まります（Recorder が前回の値を引き継ぐので、既にあれば上書きしません）。
+// If QueuedAt is unset it gets now. Listings sort by queued_at descending, so a job missing
+// the stamp sinks to the bottom. A job whose submission record alone failed gets this filled
+// by its next record (Recorder carries over the previous value, so an existing one is not
+// overwritten).
 func (s *Status) Stamp(jobID string, now time.Time) {
 	s.JobID = jobID
 	s.UpdatedAt = now
@@ -104,23 +105,23 @@ func (s *Status) Stamp(jobID string, now time.Time) {
 	}
 }
 
-// Common は、埋め込まれた共通フィールドをそのまま返します。
+// Common returns the embedded common fields as they are.
 //
-// Status を埋め込んだサービス固有の型から、共通部分だけを型引数なしで取り出すための
-// ものです（埋め込みによりメソッドが昇格するため、利用側の実装は要りません）。
+// It extracts just the common part from a service-specific type embedding Status without a
+// type parameter (the method is promoted by embedding, so callers implement nothing).
 func (s Status) Common() Status {
 	return s
 }
 
-// CarryOver は、前回の記録から引き継ぐべき共通フィールドを取り込みます。
+// CarryOver takes in the common fields that should carry over from the previous record.
 //
-// ワーカーは状態が変わるたびにタスクから状態を組み立て直すため、これが無いと
-// 再試行のたびに試行回数と投入時刻が失われます。Title と Command は、今回の
-// 組み立てで埋まっていない場合にだけ引き継ぎます（生成の途中で題目が確定する
-// サービスがあるため、新しく判明した題目を古い値で上書きしないようにするためです）。
+// The worker rebuilds the status from the task at every state change, so without this the
+// attempt count and submission time would be lost on every retry. Title and Command carry
+// over only when this build left them empty (some services settle the title mid-generation,
+// and a newly known title must not be overwritten by the old value).
 //
-// State・Error・UpdatedAt は引き継ぎません。いずれも「今回の記録」を表す値で、
-// 引き継ぐと成功後に古い失敗理由が残り続けます。
+// State, Error and UpdatedAt do not carry over. They all describe "this record", and carrying
+// them over would leave an old failure reason in place after a success.
 func (s *Status) CarryOver(prev Status) {
 	s.Attempts = prev.Attempts
 	s.QueuedAt = prev.QueuedAt
@@ -132,21 +133,21 @@ func (s *Status) CarryOver(prev Status) {
 	}
 }
 
-// EnsureJobID は、JobID が空のときだけ補います。
-// job_id を持たない古い記録を読んだときに、呼び出し側が ID 無しの構造体を
-// 受け取らないようにするためのものです。
+// EnsureJobID fills in JobID only when it is empty.
+// It keeps callers from receiving a struct without an ID when reading an old record that
+// has no job_id.
 func (s *Status) EnsureJobID(jobID string) {
 	if s.JobID == "" {
 		s.JobID = jobID
 	}
 }
 
-// Stamper は、Store が共通フィールドを維持するために使うインターフェースです。
+// Stamper is the interface Store uses to maintain the common fields.
 //
-// Status を埋め込んだ型は、ポインタメソッドの昇格によって自動的にこれを満たします。
-// 利用側が明示的に実装する必要はありません。
-// 逆に Status を埋め込んでいない型を Store に渡した場合、打刻は行われず
-// 渡された値がそのまま保存されます。
+// Types embedding Status satisfy it automatically through pointer-method promotion.
+// Callers do not need to implement it explicitly.
+// Conversely, when a type that does not embed Status is passed to Store, no stamping
+// happens and the value is saved as given.
 type Stamper interface {
 	Stamp(jobID string, now time.Time)
 	EnsureJobID(jobID string)

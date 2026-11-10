@@ -8,78 +8,81 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Reference](https://pkg.go.dev/badge/github.com/shouni/go-job-kit.svg)](https://pkg.go.dev/github.com/shouni/go-job-kit)
 
-## 🚀 概要 (About) - 投入・記録・一覧。成果物のドメインには踏み込まない
+English | [日本語](README.ja.md)
 
-**Cloud Tasks へ投入し、オブジェクトストレージへ成果物を書き出す非同期ジョブ**の共通部分を引き受けます。
-「投入する → 進行状況を記録する → 履歴をページングして一覧する」という骨格は、生成物が音楽であれ
-動画であれ漫画であれ同じ形になるので、その骨格だけをここに置いています。
+## 🚀 About - submit, record, list. The artifacts' domain stays out
 
-**成果物そのもののドメインには踏み込みません。** 生成物を表す型はアプリ側に残り、ここが扱うのは
-状態とジョブ ID だけです。認証・HTTP・通知はそれぞれ `gcp-kit` / `go-http-kit` / `go-notify` の担当です。
+This library takes on the shared parts of **asynchronous jobs that are submitted to Cloud Tasks and write their artifacts to object storage**.
+The skeleton — "submit → record progress → page through the history" — has the same shape whether the
+output is music, video or comics, so that skeleton, and only that, lives here.
 
-ジョブ状態を Firestore に置く場合は、このライブラリではなく
-[gcp-kit の `jobstatus`](https://github.com/shouni/gcp-kit) を使ってください。ここの `joblist` /
-`paging` / `cache` は「クエリの無いオブジェクトストレージで一覧を出す」ための道具なので、
-クエリのあるバックエンドでは不要になります。
+**It does not reach into the artifacts' own domain.** The types describing what was generated stay in
+the apps; this library handles state and job IDs only. Authentication, HTTP and notifications belong to
+`gcp-kit` / `go-http-kit` / `go-notify` respectively.
+
+If you keep job state in Firestore, use
+[gcp-kit's `jobstatus`](https://github.com/shouni/gcp-kit) instead of this library. `joblist` /
+`paging` / `cache` here are tools for "listing from object storage, which has no queries", so a
+backend with queries does not need them.
 
 ---
 
-## 📦 パッケージ構成 (Package Structure)
+## 📦 Package Structure
 
-ジョブの一生の、どの局面を誰が担当するかです。
+Which package handles which phase of a job's life.
 
-| パッケージ | 局面 | 役割 |
+| Package | Phase | Role |
 | --- | --- | --- |
-| `jobstatus` | 投入・実行・参照 | 進行状況を状態ファイルとして読み書きし（`Store`）、ワーカーの入口で再実行ガードと引き継ぎを行う（`Recorder`） |
-| `joblist` | 一覧 | プレフィックス直下の疑似ディレクトリ名をジョブ ID として集める（`Collect`） |
-| `paging` | 一覧 | ジョブ ID を新しい順に並べ替えてページを切り出し、そのページ分を並行に読み込む（`SelectIDs` / `LoadPage`） |
-| `cache` | 一覧 | 一覧走査の結果（`IDList`）とジョブごとのメタデータ（`TTL`）をインメモリに保持する |
+| `jobstatus` | Submit, run, read | Reads and writes progress as a status file (`Store`), and guards against re-runs and carries state over at the worker's entry point (`Recorder`) |
+| `joblist` | Listing | Collects the pseudo-directory names directly under a prefix as job IDs (`Collect`) |
+| `paging` | Listing | Sorts job IDs newest first, cuts out a page, and loads that page concurrently (`SelectIDs` / `LoadPage`) |
+| `cache` | Listing | Keeps the result of a listing scan (`IDList`) and per-job metadata (`TTL`) in memory |
 
-`paging` は標準ライブラリだけに依存します。各シンボルの引数・戻り値・エラーは
-[pkg.go.dev](https://pkg.go.dev/github.com/shouni/go-job-kit) にあります。
+`paging` depends on the standard library only. Arguments, return values and errors for every symbol are on
+[pkg.go.dev](https://pkg.go.dev/github.com/shouni/go-job-kit).
 
 ---
 
-## 🚦 使い方 (Usage)
+## 🚦 Usage
 
-状態の型を定義し、`Store` を組み立てて、投入直後に `queued` を記録するまでです。
+Define the status type, build a `Store`, and record `queued` right after submitting.
 
 ```go
-// 成果物の保存先はサービスごとに形が違うため、共通フィールドだけを Status が持ちます。
-// サービス固有のフィールドは、これを埋め込んだ型に足してください。
+// Where artifacts are stored differs per service, so Status holds only the common fields.
+// Add service-specific fields to the type that embeds it.
 type JobStatus struct {
     jobstatus.Status
     OutputDir string `json:"output_dir,omitempty"`
 }
 
-// storage には remoteio.Store をそのまま渡せます。
+// A remoteio.Store can be passed as storage directly.
 store := jobstatus.NewStore[JobStatus](
     storage,
     jobstatus.UnderJobDir("gs://"+bucket+"/jobs"), // → .../jobs/{jobID}/status.json
 )
 
-// JobID と UpdatedAt は Save が打刻します。
+// Save stamps JobID and UpdatedAt.
 err := store.Save(ctx, jobID, JobStatus{State: jobstatus.StateQueued, Command: "generate"})
 ```
 
-ワーカー側の入口（`Recorder.Begin`）と一覧側（`joblist.Collect` → `cache.IDList` → `paging.LoadPage`）の
-例は godoc にあります。**踏むと高くつく点も、それぞれの godoc に書いてあります** — 状態を読めなかった
-ときに再実行ガードをどちらへも倒さないこと、`LoadPage` が load の失敗を返さず行を落とすこと、
-並べ替えキーに既定を置いていないこと、埋め込みをやめると保存済みの `status.json` が読めなくなること。
+Examples for the worker's entry point (`Recorder.Begin`) and the listing side (`joblist.Collect` → `cache.IDList` → `paging.LoadPage`)
+are in the godoc. **The costly pitfalls are written in each godoc too** — do not tip the re-run guard
+either way when the status could not be read; `LoadPage` drops rows rather than returning load failures;
+there is no default sort key; and stopping the embedding makes stored `status.json` files unreadable.
 
 ---
 
-## 🤝 依存関係 (Dependencies)
+## 🤝 Dependencies
 
-| パッケージ | 用途 |
+| Package | Purpose |
 | --- | --- |
-| [shouni/go-remote-io](https://github.com/shouni/go-remote-io) | 状態ファイルの読み書きと一覧走査（GCS / S3 / ローカルを透過的に扱う） |
-| [shouni/go-utils](https://github.com/shouni/go-utils) | ジョブ ID の検証・正規化 (`jobid`) |
-| [jellydator/ttlcache](https://github.com/jellydator/ttlcache) | TTL 付きインメモリキャッシュ |
-| [golang.org/x/sync](https://pkg.go.dev/golang.org/x/sync/singleflight) | 同時のキャッシュミスで一覧走査を 1 回にまとめる（`cache.IDList`） |
+| [shouni/go-remote-io](https://github.com/shouni/go-remote-io) | Reading and writing status files and scanning listings (GCS / S3 / local, transparently) |
+| [shouni/go-utils](https://github.com/shouni/go-utils) | Job ID validation and normalization (`jobid`) |
+| [jellydator/ttlcache](https://github.com/jellydator/ttlcache) | In-memory cache with TTL |
+| [golang.org/x/sync](https://pkg.go.dev/golang.org/x/sync/singleflight) | Collapses concurrent cache misses into a single listing scan (`cache.IDList`) |
 
 ---
 
-## 📜 ライセンス (License)
+## 📜 License
 
-このプロジェクトは [MIT License](https://opensource.org/licenses/MIT) の下で公開されています。
+This project is released under the [MIT License](https://opensource.org/licenses/MIT).
